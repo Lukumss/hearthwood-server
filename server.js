@@ -26,9 +26,11 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 const clients = new Map();   // ws -> player
+const plots = {};            // gid -> { name, tier, ownerId }  (house ownership)
 let nextId = 1;
 
 function send(ws, obj){ if (ws.readyState === 1) { try { ws.send(JSON.stringify(obj)); } catch (e) {} } }
+function broadcastPlots(){ const out = { t:'plots', map:plots }; for (const ws2 of clients.keys()) send(ws2, out); }
 
 wss.on('connection', (ws) => {
   const id = 'u' + (nextId++);
@@ -36,8 +38,8 @@ wss.on('connection', (ws) => {
                    x:0, y:0, dir:'down', zone:'town', moving:false, chat:null, chatUntil:0 };
   clients.set(ws, player);
 
-  // hand the new client its id + the shared world seed
-  send(ws, { t:'welcome', id, seed: WORLD_SEED });
+  // hand the new client its id + the shared world seed + current plot ownership
+  send(ws, { t:'welcome', id, seed: WORLD_SEED, plots });
 
   ws.on('message', (buf) => {
     let m; try { m = JSON.parse(buf); } catch (e) { return; }
@@ -59,6 +61,14 @@ wss.on('connection', (ws) => {
       player.dir = m.dir || 'down';
       player.zone = m.zone || player.zone;
       player.moving = !!m.moving;
+    } else if (m.t === 'claim') {
+      // claim/upgrade a house plot. One home per player: free any other plot they hold.
+      const gid = '' + m.gid, tier = '' + (m.tier || 'basic');
+      const cur = plots[gid];
+      if (cur && cur.ownerId !== player.id) { send(ws, { t:'plots', map:plots }); return; } // taken — resync
+      for (const g in plots) { if (plots[g].ownerId === player.id && g !== gid) delete plots[g]; }
+      plots[gid] = { name: player.name, tier, ownerId: player.id };
+      broadcastPlots();
     } else if (m.t === 'chat') {
       player.chat = ('' + m.text).slice(0, 80);
       player.chatUntil = Date.now() + 5000;
