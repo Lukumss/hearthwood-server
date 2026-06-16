@@ -32,7 +32,7 @@ function send(ws, obj){ if (ws.readyState === 1) { try { ws.send(JSON.stringify(
 
 wss.on('connection', (ws) => {
   const id = 'u' + (nextId++);
-  const player = { id, name:'Adventurer', sprite:'player', color:'#7fd0ff',
+  const player = { id, name:'Adventurer', color:'#7fd0ff', look:null,
                    x:0, y:0, dir:'down', zone:'town', moving:false, chat:null, chatUntil:0 };
   clients.set(ws, player);
 
@@ -41,11 +41,19 @@ wss.on('connection', (ws) => {
 
   ws.on('message', (buf) => {
     let m; try { m = JSON.parse(buf); } catch (e) { return; }
-    if (m.t === 'join') {
+    if (m.t === 'checkname') {
+      // unique-name check (case-insensitive) against everyone currently connected
+      const want = ('' + (m.name || '')).trim().toLowerCase();
+      let taken = false;
+      for (const q of clients.values()) { if (q !== player && (q.name || '').toLowerCase() === want) { taken = true; break; } }
+      send(ws, { t:'nameres', name:m.name, ok: !taken && want.length > 0 });
+    } else if (m.t === 'join') {
       player.name   = ('' + (m.name || 'Adventurer')).slice(0, 16);
-      player.sprite = m.sprite || player.sprite;
       player.color  = m.color  || player.color;
       player.zone   = m.zone   || player.zone;
+      if (m.look) player.look = m.look;
+    } else if (m.t === 'look') {
+      if (m.look) player.look = m.look;
     } else if (m.t === 'state') {
       player.x = m.x; player.y = m.y;
       player.dir = m.dir || 'down';
@@ -75,7 +83,7 @@ setInterval(() => {
     const list = [];
     for (const q of peers) {
       if (q.id === p.id) continue;
-      list.push({ id:q.id, name:q.name, sprite:q.sprite, color:q.color,
+      list.push({ id:q.id, name:q.name, color:q.color, look:q.look,
                   x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, moving:q.moving,
                   chat: q.chatUntil > now ? q.chat : null });
     }
