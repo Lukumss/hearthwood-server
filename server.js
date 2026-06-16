@@ -13,6 +13,20 @@
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const fs = require('fs');
+const path = require('path');
+
+// ---- durable player saves (Render Persistent Disk) ----
+// Render mounts your disk at the path you set; default to /data, fall back to a
+// local folder for testing so the server still runs anywhere.
+let SAVE_DIR = process.env.SAVE_DIR || '/data';
+try { fs.mkdirSync(SAVE_DIR, { recursive: true }); fs.accessSync(SAVE_DIR, fs.constants.W_OK); }
+catch (e) { SAVE_DIR = path.join(__dirname, 'hearthwood-saves'); try { fs.mkdirSync(SAVE_DIR, { recursive: true }); } catch (e2) {} }
+console.log('Saves stored in: ' + SAVE_DIR);
+function acctKey(name){ return String(name||'').trim().toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,24); }
+function acctPath(name){ return path.join(SAVE_DIR, acctKey(name) + '.json'); }
+function readAcct(name){ try { return JSON.parse(fs.readFileSync(acctPath(name), 'utf8')); } catch (e) { return null; } }
+function writeAcct(name, obj){ try { fs.writeFileSync(acctPath(name), JSON.stringify(obj)); return true; } catch (e) { return false; } }
 
 const PORT = process.env.PORT || 2567;       // hosts set PORT automatically
 const WORLD_SEED = 424242;                    // the whole realm grows from this — keep it fixed forever
@@ -50,6 +64,26 @@ wss.on('connection', (ws) => {
       let taken = false;
       for (const q of clients.values()) { if (q !== player && (q.name || '').toLowerCase() === want) { taken = true; break; } }
       send(ws, { t:'nameres', name:m.name, ok: !taken && want.length > 0 });
+    } else if (m.t === 'login') {
+      // name + 4-digit PIN. New name -> create account. Existing -> PIN must match.
+      const key = acctKey(m.name); const pin = String(m.pin||'').slice(0,8);
+      if (!key || pin.length < 3) { send(ws, { t:'login_fail', reason:'Enter a name and a 4-digit PIN' }); return; }
+      const acct = readAcct(key);
+      if (acct) {
+        if (acct.pin !== pin) { send(ws, { t:'login_fail', reason:'Wrong PIN for that hero' }); return; }
+        player.account = key; player.name = acct.name || m.name;
+        send(ws, { t:'login_ok', save: acct.save || null, isNew: !acct.save, name: player.name });
+      } else {
+        player.account = key; player.name = ('' + (m.name||'Hero')).slice(0,16);
+        writeAcct(key, { name: player.name, pin, save: null, created: Date.now() });
+        send(ws, { t:'login_ok', save: null, isNew: true, name: player.name });
+      }
+    } else if (m.t === 'cloudsave') {
+      if (player.account && m.save) {
+        const acct = readAcct(player.account) || { name: player.name, pin: '0000' };
+        acct.save = m.save; acct.name = player.name; acct.updated = Date.now();
+        writeAcct(player.account, acct);
+      }
     } else if (m.t === 'join') {
       player.name   = ('' + (m.name || 'Adventurer')).slice(0, 16);
       player.color  = m.color  || player.color;
@@ -105,6 +139,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    // final cloud save on disconnect (best effort)
     const tws = wsById(player.tradeWith); if (tws) send(tws, { t:'trade_cancel', reason:'The other player left' });
     const tp = tws && clients.get(tws); if (tp) tp.tradeWith = null;
     clients.delete(ws);
