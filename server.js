@@ -31,6 +31,7 @@ let nextId = 1;
 
 function send(ws, obj){ if (ws.readyState === 1) { try { ws.send(JSON.stringify(obj)); } catch (e) {} } }
 function broadcastPlots(){ const out = { t:'plots', map:plots }; for (const ws2 of clients.keys()) send(ws2, out); }
+function wsById(id){ for (const [ws, p] of clients) { if (p.id === id) return ws; } return null; }
 
 wss.on('connection', (ws) => {
   const id = 'u' + (nextId++);
@@ -69,6 +70,31 @@ wss.on('connection', (ws) => {
       for (const g in plots) { if (plots[g].ownerId === player.id && g !== gid) delete plots[g]; }
       plots[gid] = { name: player.name, tier, ownerId: player.id };
       broadcastPlots();
+    } else if (m.t === 'trade_req') {
+      const tws = wsById(m.to); if (tws) send(tws, { t:'trade_req', from:player.id, name:player.name });
+    } else if (m.t === 'trade_accept') {
+      const tws = wsById(m.to), tp = tws && clients.get(tws);
+      if (tp) { player.tradeWith = tp.id; tp.tradeWith = player.id;
+        player.tradeOffer = { items:[], gold:0 }; tp.tradeOffer = { items:[], gold:0 }; player.tradeOK = false; tp.tradeOK = false;
+        send(ws,  { t:'trade_start', other:{ id:tp.id, name:tp.name } });
+        send(tws, { t:'trade_start', other:{ id:player.id, name:player.name } }); }
+    } else if (m.t === 'trade_offer') {
+      player.tradeOffer = { items:(m.items||[]).slice(0,12), gold:Math.max(0, m.gold|0) }; player.tradeOK = false;
+      const tws = wsById(player.tradeWith), tp = tws && clients.get(tws);
+      if (tp) { tp.tradeOK = false; send(tws, { t:'trade_other', items:player.tradeOffer.items, gold:player.tradeOffer.gold }); send(ws, { t:'trade_otherconfirm', confirmed:false }); }
+    } else if (m.t === 'trade_confirm') {
+      player.tradeOK = !!m.confirmed;
+      const tws = wsById(player.tradeWith), tp = tws && clients.get(tws);
+      if (tp) { send(tws, { t:'trade_otherconfirm', confirmed:player.tradeOK });
+        if (player.tradeOK && tp.tradeOK) {
+          send(ws,  { t:'trade_done', get:tp.tradeOffer, give:player.tradeOffer });
+          send(tws, { t:'trade_done', get:player.tradeOffer, give:tp.tradeOffer });
+          player.tradeWith = null; tp.tradeWith = null;
+        } }
+    } else if (m.t === 'trade_cancel') {
+      const tws = wsById(player.tradeWith), tp = tws && clients.get(tws);
+      if (tws) send(tws, { t:'trade_cancel', reason:player.name + ' cancelled the trade' });
+      if (tp) tp.tradeWith = null; player.tradeWith = null;
     } else if (m.t === 'chat') {
       player.chat = ('' + m.text).slice(0, 80);
       player.chatUntil = Date.now() + 5000;
@@ -78,7 +104,11 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => clients.delete(ws));
+  ws.on('close', () => {
+    const tws = wsById(player.tradeWith); if (tws) send(tws, { t:'trade_cancel', reason:'The other player left' });
+    const tp = tws && clients.get(tws); if (tp) tp.tradeWith = null;
+    clients.delete(ws);
+  });
   ws.on('error', () => clients.delete(ws));
 });
 
