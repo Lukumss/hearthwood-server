@@ -54,6 +54,9 @@ wss.on('connection', (ws) => {
     } else if (m.t === 'chat') {
       player.chat = ('' + m.text).slice(0, 80);
       player.chatUntil = Date.now() + 5000;
+      // WORLD CHAT: relay to every connected player, in any zone
+      const out = { t:'say', name:player.name, color:player.color, zone:player.zone, text:player.chat };
+      for (const ws2 of clients.keys()) send(ws2, out);
     }
   });
 
