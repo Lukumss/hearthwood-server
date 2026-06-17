@@ -219,6 +219,10 @@ function runServerBossAI(zone,e,tgt){
     const ang=Math.atan2(tgt.y-e.y, tgt.x-e.x);
     const spots=[]; for(let i=1;i<=5;i++){ const d=i*42; spots.push({x:Math.round(e.x+Math.cos(ang)*d),y:Math.round(e.y+Math.sin(ang)*d)}); }
     out.spots=spots; out.delay=1.4; out.r=40; out.dmg=Math.round(e.dmg*1.6); out.slam=1;
+  } else if(e.bossAI==='knight'){
+    // the Knight slams the ground → an expanding shockwave RING the party must outrun/jump the gap of
+    e.castCd=srnd(5,7); e.swing=0.4;
+    out.kind='shockwave'; out.delay=0.9; out.maxR=200; out.expand=1.1; out.dmg=Math.round(e.dmg*1.3);
   }
   for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
 }
