@@ -144,6 +144,10 @@ wss.on('connection', (ws) => {
         const tws = wsById(m.target);
         if (tws) send(tws, { t:'ehit', dmg:m.dmg|0, kind:m.kind||'melee' });
       }
+    } else if (m.t === 'fx') {
+      // visual-only effect/projectile/slash — relay to everyone else in the zone
+      const out = Object.assign({}, m);
+      for (const [ws2, q] of clients) if (q !== player && q.zone === player.zone) send(ws2, out);
     } else if (m.t === 'claim') {
       // claim/upgrade a house plot. One home per player: free any other plot they hold.
       const gid = '' + m.gid, tier = '' + (m.tier || 'basic');
