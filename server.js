@@ -120,6 +120,7 @@ wss.on('connection', (ws) => {
       player.dir = m.dir || 'down';
       player.zone = m.zone || player.zone;
       player.moving = !!m.moving;
+      player.sw = m.sw?1:0;
       if (player.zone !== oldZone) { assignHost(oldZone); assignHost(player.zone); }
     } else if (m.t === 'enemies') {
       // only the zone host's snapshot is trusted; relay to everyone else in the zone
@@ -247,7 +248,7 @@ setInterval(() => {
     for (const q of peers) {
       if (q.id === p.id) continue;
       list.push({ id:q.id, name:q.name, color:q.color, look:q.look,
-                  x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, moving:q.moving,
+                  x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, moving:q.moving, sw:q.sw?1:0,
                   chat: q.chatUntil > now ? q.chat : null });
     }
     send(ws, { t:'players', zone:p.zone, here: peers.length, online: clients.size, list });
