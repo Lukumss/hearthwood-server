@@ -60,6 +60,148 @@ function assignHost(zone){
   const hid = zoneHost[zone];
   for (const [ws2, q] of clients) if (q.zone === zone) send(ws2, { t:'host', zone, host: q.id === hid });
 }
+// ============================================================
+//  SERVER-AUTHORITATIVE MOB SIMULATION
+//  The server owns every zone's monsters. Clients upload the
+//  (seed-deterministic) collision grid + spawn data once per
+//  zone, then become pure renderers. No host, no alt-tab freeze.
+// ============================================================
+const TILE = 16;
+const zoneMaps = {};   // zone -> { w,h,solid:Uint8Array, spawns, maxMobs, level, bossSpawn, campSpawns, playerSpawn, etypes }
+const zoneMobs = {};   // zone -> [ mob ]
+const zoneSpawnCd = {};
+let _mid = 1;
+function srnd(a,b){ return a + Math.random()*(b-a); }
+function sri(a,b){ return Math.floor(a + Math.random()*(b-a+1)); }
+function sdist(ax,ay,bx,by){ return Math.hypot(ax-bx, ay-by); }
+function mapSolidPx(map,x,y){ const tx=Math.floor(x/TILE), ty=Math.floor(y/TILE); if(tx<0||ty<0||tx>=map.w||ty>=map.h) return true; return !!map.solid[ty*map.w+tx]; }
+function mapBoxSolid(map,cx,cy,hw,hh){ return mapSolidPx(map,cx-hw,cy-hh)||mapSolidPx(map,cx+hw,cy-hh)||mapSolidPx(map,cx-hw,cy+hh)||mapSolidPx(map,cx+hw,cy+hh)||mapSolidPx(map,cx,cy+hh)||mapSolidPx(map,cx,cy-hh); }
+
+// store a client-provided map for a zone (first valid upload wins; identical for all via the seed)
+function ingestZoneMap(zone, d){
+  if(zoneMaps[zone]) return;
+  if(!d || !d.w || !d.h || !d.solid || !d.etypes) return;
+  const solid = Uint8Array.from(d.solid);
+  zoneMaps[zone] = { w:d.w, h:d.h, solid, spawns:d.spawns||[], maxMobs:d.maxMobs||0, level:d.level||1,
+                     bossSpawn:d.bossSpawn||null, campSpawns:d.campSpawns||[], playerSpawn:d.playerSpawn||{x:d.w*TILE/2,y:d.h*TILE/2}, etypes:d.etypes };
+  zoneMobs[zone] = [];
+  if((d.maxMobs||0) > 0){
+    // boss + camp guards + an initial population
+    if(d.bossSpawn) spawnMob(zone, d.bossSpawn.type, d.bossSpawn.x, d.bossSpawn.y, true);
+    for(const c of (d.campSpawns||[])) spawnMob(zone, c.type||'mercenary', c.x, c.y, false);
+    const initial = Math.min(Math.round(d.maxMobs*0.55), d.maxMobs);
+    for(let i=0;i<initial;i++) spawnRandomMobAt(zone);
+  }
+}
+function spawnMob(zone, type, x, y, isBoss){
+  const map=zoneMaps[zone]; if(!map) return null;
+  const t=map.etypes[type]; if(!t) return null;
+  const lvl=map.level||1;
+  const scaleHp = isBoss?1:(1+(lvl-1)*0.6), scaleDmg = isBoss?1:(1+(lvl-1)*0.4);
+  const mob={ id:'m'+(_mid++), type, x, y, homeX:x, homeY:y,
+    hp:Math.round(t.hp*scaleHp), maxHp:Math.round(t.hp*scaleHp), dmg:Math.round(t.dmg*scaleDmg),
+    speed:t.speed, speedBase:t.speed, range:t.range, atkspd:t.atkspd, aggro:t.aggro, xp:t.xp, gold:t.gold,
+    scale:t.scale, boss:!!isBoss, atype:t.atype||'melee', flee:!!t.flee, mount:t.mount||null, elite:!!t.elite,
+    dir:'down', state:'idle', atkCd:srnd(0,1), wanderT:0, vx:0, vy:0, stun:0, slow:0, lastHitBy:null,
+    castCd: isBoss? srnd(4,6):0, bossAI:t.bossAI||null };
+  zoneMobs[zone].push(mob);
+  return mob;
+}
+function spawnRandomMobAt(zone){
+  const map=zoneMaps[zone]; if(!map || !map.spawns.length) return;
+  if((zoneMobs[zone]||[]).filter(m=>!m.boss).length >= map.maxMobs) return;
+  // a walkable spot away from all players
+  for(let tries=0; tries<14; tries++){
+    const tx=sri(3,map.w-4), ty=sri(3,map.h-4);
+    if(map.solid[ty*map.w+tx]) continue;
+    const x=tx*TILE+8, y=ty*TILE+8;
+    let near=false; for(const p of clients.values()){ if(p.zone===zone && sdist(p.x,p.y,x,y)<150){ near=true; break; } }
+    if(near) continue;
+    let total=0; for(const s of map.spawns) total+=s.w; let roll=Math.random()*total, type=map.spawns[0].type;
+    for(const s of map.spawns){ roll-=s.w; if(roll<=0){ type=s.type; break; } }
+    spawnMob(zone, type, x, y, false); return;
+  }
+}
+function stepMobToward(map, o, tx, ty, speed, dt, hw, hh){
+  let base=Math.atan2(ty-o.y, tx-o.x);
+  if(o._detourT>0){ o._detourT-=dt; base+=o._detour*0.9; }
+  for(const off of [0,0.5,-0.5,1.0,-1.0,1.6,-1.6,2.2,-2.2,2.8,-2.8]){
+    const a=base+off, nx=o.x+Math.cos(a)*speed*dt, ny=o.y+Math.sin(a)*speed*dt;
+    let moved=false;
+    if(!mapBoxSolid(map,nx,o.y,hw,hh)){ o.x=nx; moved=true; }
+    if(!mapBoxSolid(map,o.x,ny,hw,hh)){ o.y=ny; moved=true; }
+    if(moved){ o._stuckT=0; return true; }
+  }
+  if(o._detourT<=0){ o._detour=(Math.random()<0.5?1:-1); o._detourT=0.7; }
+  return false;
+}
+// players present in a zone (targets)
+function zonePlayers(zone){ const a=[]; for(const p of clients.values()) if(p.zone===zone && !p.dead) a.push(p); return a; }
+function nearestPlayer(zone, x, y){ let best=null,bd=1e9; for(const p of zonePlayers(zone)){ const d=sdist(x,y,p.x,p.y); if(d<bd){bd=d;best=p;} } return best?{p:best,d:bd}:null; }
+
+// one simulation step for a zone (called from the tick)
+function simZone(zone, dt){
+  const map=zoneMaps[zone]; const mobs=zoneMobs[zone]; if(!map||!mobs) return;
+  const leash = 520;   // ~one screen in world px
+  for(let i=mobs.length-1;i>=0;i--){
+    const e=mobs[i];
+    e.atkCd=Math.max(0,e.atkCd-dt);
+    e.stun=Math.max(0,e.stun-dt); e.slow=Math.max(0,e.slow-dt);
+    e.speed=e.speedBase*(e.slow>0?0.45:1);
+    if(e.stun>0) continue;
+    const near=nearestPlayer(zone, e.x, e.y);
+    const tgt=near?near.p:null, d=near?near.d:1e9;
+    const distHome=sdist(e.x,e.y,e.homeX,e.homeY);
+    // boss AOE telegraph (server-driven; broadcast so all see + can be hit)
+    if(e.boss && e.bossAI){ e.castCd-=dt; if(e.castCd<=0 && tgt){ e.castCd= e.bossAI==='dragon'?7:3; runServerBossAI(zone,e,tgt); } }
+    if(e.flee){
+      if(tgt && d<170){ const ang=Math.atan2(e.y-tgt.y,e.x-tgt.x)+srnd(-0.4,0.4); stepMobToward(map,e,e.x+Math.cos(ang)*60,e.y+Math.sin(ang)*60,e.speed,dt,4,3); e.dir=Math.cos(ang)<0?'left':'right'; }
+      else { e.wanderT-=dt; if(e.wanderT<=0){ e.wanderT=srnd(1,2.5); e.vx=srnd(-1,1); e.vy=srnd(-1,1); } stepMobToward(map,e,e.x+e.vx*40,e.y+e.vy*40,e.speed*0.4,dt,4,3); }
+      continue;
+    }
+    if(!e.boss && distHome>leash){ e.state='return'; }
+    if(e.state==='return'){ if(distHome<30){ e.state='idle'; } else { stepMobToward(map,e,e.homeX,e.homeY,e.speed,dt,5,4); continue; } }
+    if(tgt && (d<e.aggro || e.boss)) e.state='chase';
+    else if(d>e.aggro*1.6) e.state='idle';
+    if(e.state==='chase' && tgt){
+      if(d>e.range*0.85){ stepMobToward(map,e,tgt.x,tgt.y,e.speed,dt,4,3); e.dir = Math.abs(tgt.x-e.x)>Math.abs(tgt.y-e.y)?(tgt.x<e.x?'left':'right'):(tgt.y<e.y?'up':'down'); }
+      else if(e.atkCd<=0){ e.atkCd=1/e.atkspd; e.swing=0.2;
+        // deal damage to the target player (client applies to its own HP)
+        const tws=wsById(tgt.id); if(tws) send(tws, { t:'ehit', dmg:e.dmg, kind:e.atype });
+      }
+    } else {
+      e.wanderT-=dt; if(e.wanderT<=0){ e.wanderT=srnd(1.5,3.5); e.vx=srnd(-1,1); e.vy=srnd(-1,1); }
+      if(distHome>70){ e.vx=(e.homeX-e.x); e.vy=(e.homeY-e.y); const l=Math.hypot(e.vx,e.vy)||1; e.vx/=l; e.vy/=l; }
+      stepMobToward(map,e,e.x+e.vx*40,e.y+e.vy*40,e.speed*0.4,dt,5,4);
+    }
+  }
+  // respawn over time
+  zoneSpawnCd[zone]=(zoneSpawnCd[zone]||0)-dt;
+  if(zoneSpawnCd[zone]<=0){ zoneSpawnCd[zone]=srnd(2.5,4.5); spawnRandomMobAt(zone); }
+}
+function runServerBossAI(zone,e,tgt){
+  // broadcast a telegraphed AOE that every player in the zone sees + can be caught by
+  const out={ t:'saoe', zone, x:Math.round(tgt.x), y:Math.round(tgt.y), kind:e.bossAI };
+  for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
+}
+// apply a player's hit to a server mob; handle death + rewards broadcast
+function applyHitToMob(zone, id, dmg, crit, byId){
+  const mobs=zoneMobs[zone]; if(!mobs) return;
+  const e=mobs.find(m=>m.id===id); if(!e) return;
+  e.hp-=dmg; e.lastHitBy=byId; e.state='chase'; e.hurt=0.12;
+  if(e.hp<=0){
+    const idx=mobs.indexOf(e); if(idx>=0) mobs.splice(idx,1);
+    const out={ t:'mdead', zone, id:e.id, by:e.lastHitBy, boss:!!e.boss, type:e.type, xp:e.xp|0, x:Math.round(e.x), y:Math.round(e.y) };
+    for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
+  }
+}
+// compact mob snapshot for clients
+function mobSnapshot(zone){
+  const mobs=zoneMobs[zone]||[]; const list=[];
+  for(const e of mobs){ list.push({ id:e.id, t:e.type, x:Math.round(e.x), y:Math.round(e.y), hp:Math.round(e.hp), mh:e.maxHp, dir:e.dir, b:e.boss?1:0, sc:e.scale, st:e.state, at:e.atype, sw:e.swing>0?1:0, hu:e.hurt>0?1:0 }); e.swing=Math.max(0,(e.swing||0)-0.08); e.hurt=Math.max(0,(e.hurt||0)-0.08); }
+  return list;
+}
+
 // build a friend list with live online status for a player
 function sendFriendList(ws, player){
   const acct = readAcct(player.account) || {};
@@ -132,28 +274,12 @@ wss.on('connection', (ws) => {
       const was = player.inactive;
       player.inactive = !m.active;
       if (was !== player.inactive) assignHost(player.zone);
-    } else if (m.t === 'enemies') {
-      // only the zone host's snapshot is trusted; relay to everyone else in the zone
-      if (zoneHost[player.zone] === player.id) {
-        const out = { t:'enemies', list:m.list || [], proj:m.proj || [] };
-        for (const [ws2, q] of clients) if (q !== player && q.zone === player.zone) send(ws2, out);
-      }
+    } else if (m.t === 'zonemap') {
+      // a client uploads the seed-deterministic collision grid + spawn data for a zone
+      ingestZoneMap(m.zone, m);
     } else if (m.t === 'hit') {
-      // a guest hit an enemy → forward to the host to apply authoritatively
-      const hid = zoneHost[player.zone]; const hws = hid && wsById(hid);
-      if (hws && hid !== player.id) send(hws, { t:'hit', id:m.id, dmg:m.dmg, crit:!!m.crit, by:player.id });
-    } else if (m.t === 'ekill') {
-      // host declares an enemy dead → tell everyone in the zone (killer rolls own loot/xp)
-      if (zoneHost[player.zone] === player.id) {
-        const out = { t:'ekill', id:m.id, by:m.by, boss:!!m.boss, type:m.type, xp:m.xp|0, x:m.x, y:m.y };
-        for (const [ws2, q] of clients) if (q.zone === player.zone) send(ws2, out);
-      }
-    } else if (m.t === 'ehit') {
-      // host: an enemy hit a specific guest → deliver the damage to them
-      if (zoneHost[player.zone] === player.id) {
-        const tws = wsById(m.target);
-        if (tws) send(tws, { t:'ehit', dmg:m.dmg|0, kind:m.kind||'melee' });
-      }
+      // a player damaged a server-owned mob → apply authoritatively
+      applyHitToMob(player.zone, m.id, m.dmg|0, !!m.crit, player.id);
     } else if (m.t === 'fx') {
       // visual-only effect/projectile/slash — relay to everyone else in the zone
       const out = Object.assign({}, m);
@@ -250,11 +376,23 @@ wss.on('connection', (ws) => {
   ws.on('error', () => clients.delete(ws));
 });
 
-// broadcast a per-zone snapshot to everyone, 15x/sec
+// broadcast a per-zone snapshot to everyone, 15x/sec; the server also SIMULATES mobs
+let _lastTick = Date.now();
 setInterval(() => {
   const now = Date.now();
+  const dt = Math.min(0.2, (now - _lastTick)/1000) || TICK_MS/1000; _lastTick = now;
   const byZone = {};
   for (const p of clients.values()) (byZone[p.zone] = byZone[p.zone] || []).push(p);
+
+  // run the authoritative mob simulation for every occupied zone
+  for (const zone in byZone) {
+    if (zoneMaps[zone]) simZone(zone, dt);
+    else {
+      // no map yet — ask one occupant to upload the seed-deterministic grid
+      const asker = byZone[zone][0];
+      if (asker && !asker._askedMap) { asker._askedMap = true; const ws = wsById(asker.id); if (ws) send(ws, { t:'needmap', zone }); }
+    }
+  }
 
   for (const [ws, p] of clients) {
     const peers = byZone[p.zone] || [];
@@ -266,7 +404,11 @@ setInterval(() => {
                   chat: q.chatUntil > now ? q.chat : null });
     }
     send(ws, { t:'players', zone:p.zone, here: peers.length, online: clients.size, list });
+    if (zoneMaps[p.zone]) send(ws, { t:'mobs', zone:p.zone, list: mobSnapshot(p.zone) });
   }
+
+  // free mobs/maps for zones nobody is in (so they re-seed fresh next time)
+  for (const zone in zoneMobs) { if (!byZone[zone]) { delete zoneMobs[zone]; delete zoneMaps[zone]; for (const p of clients.values()) p._askedMap = false; } }
 }, TICK_MS);
 
 server.listen(PORT, () => console.log('Hearthwood server listening on port ' + PORT));
