@@ -46,6 +46,17 @@ let nextId = 1;
 function send(ws, obj){ if (ws.readyState === 1) { try { ws.send(JSON.stringify(obj)); } catch (e) {} } }
 function broadcastPlots(){ const out = { t:'plots', map:plots }; for (const ws2 of clients.keys()) send(ws2, out); }
 function wsById(id){ for (const [ws, p] of clients) { if (p.id === id) return ws; } return null; }
+// build a friend list with live online status for a player
+function sendFriendList(ws, player){
+  const acct = readAcct(player.account) || {};
+  const friends = (acct.friends || []).map(fkey => {
+    let online = false, name = fkey;
+    for (const q of clients.values()) { if (q.account === fkey) { online = true; name = q.name; break; } }
+    if (!online) { const fa = readAcct(fkey); if (fa) name = fa.name || fkey; }
+    return { key:fkey, name, online };
+  });
+  send(ws, { t:'social_list', friends });
+}
 
 wss.on('connection', (ws) => {
   const id = 'u' + (nextId++);
@@ -130,11 +141,50 @@ wss.on('connection', (ws) => {
       if (tws) send(tws, { t:'trade_cancel', reason:player.name + ' cancelled the trade' });
       if (tp) tp.tradeWith = null; player.tradeWith = null;
     } else if (m.t === 'chat') {
-      player.chat = ('' + m.text).slice(0, 80);
-      player.chatUntil = Date.now() + 5000;
-      // WORLD CHAT: relay to every connected player, in any zone
-      const out = { t:'say', name:player.name, color:player.color, zone:player.zone, text:player.chat };
-      for (const ws2 of clients.keys()) send(ws2, out);
+      const text = ('' + m.text).slice(0, 120);
+      const ch = m.ch || 'world';
+      if (ch === 'world' || ch === 'area' || ch === 'local') { player.chat = text.slice(0,80); player.chatUntil = Date.now() + 5000; }
+      const out = { t:'say', ch, name:player.name, color:player.color, zone:player.zone, text };
+      if (ch === 'area') {
+        // AREA: only players in the same zone
+        for (const [ws2, q] of clients) if (q.zone === player.zone) send(ws2, out);
+      } else if (ch === 'guild') {
+        // GUILD: same guild tag (guild system TBD — for now, only members of a shared tag)
+        const g = player.guild || null;
+        for (const [ws2, q] of clients) if (g && q.guild === g) send(ws2, out);
+        if (!g) send(ws, { t:'say', ch:'guild', name:'System', color:'#caa46a', text:'You are not in a guild yet.' });
+      } else {
+        // WORLD: everyone
+        for (const ws2 of clients.keys()) send(ws2, out);
+      }
+    } else if (m.t === 'social_add') {
+      const fkey = acctKey(m.name);
+      if (!player.account) { send(ws, { t:'social_err', reason:'Log in with a hero to add friends' }); return; }
+      if (!fkey || fkey === player.account) { send(ws, { t:'social_err', reason:'Enter a valid hero name' }); return; }
+      const target = readAcct(fkey);
+      if (!target) { send(ws, { t:'social_err', reason:'No hero named "' + m.name + '" exists' }); return; }
+      const acct = readAcct(player.account) || {};
+      acct.friends = acct.friends || [];
+      if (!acct.friends.includes(fkey)) { acct.friends.push(fkey); writeAcct(player.account, acct); }
+      sendFriendList(ws, player);
+    } else if (m.t === 'social_remove') {
+      const fkey = acctKey(m.name);
+      const acct = readAcct(player.account) || {};
+      acct.friends = (acct.friends || []).filter(f => f !== fkey);
+      writeAcct(player.account, acct);
+      sendFriendList(ws, player);
+    } else if (m.t === 'social_list') {
+      sendFriendList(ws, player);
+    } else if (m.t === 'dm') {
+      const fkey = acctKey(m.to);
+      const text = ('' + m.text).slice(0, 200);
+      // find an online client on that account
+      let tws = null, tname = m.to;
+      for (const [ws2, q] of clients) { if (q.account === fkey) { tws = ws2; tname = q.name; break; } }
+      const stamp = { t:'dm', from:player.name, fromKey:player.account, to:tname, toKey:fkey, text, ts:Date.now() };
+      send(ws, stamp);                       // echo to sender
+      if (tws && tws !== ws) send(tws, stamp); // deliver to recipient
+      else if (!tws) send(ws, { t:'dm_offline', to:m.to });
     }
   });
 
