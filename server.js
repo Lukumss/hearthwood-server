@@ -53,7 +53,10 @@ function assignHost(zone){
   const inZone = [...clients.values()].filter(p => p.zone === zone);
   if (inZone.length === 0) { delete zoneHost[zone]; return; }
   const cur = zoneHost[zone];
-  if (!cur || !inZone.some(p => p.id === cur)) zoneHost[zone] = inZone[0].id;  // pick a new host
+  // prefer an ACTIVE (foregrounded) player as host; only fall back to inactive if all are
+  const active = inZone.filter(p => !p.inactive);
+  const pool = active.length ? active : inZone;
+  if (!cur || !pool.some(p => p.id === cur)) zoneHost[zone] = pool[0].id;  // (re)elect from the eligible pool
   const hid = zoneHost[zone];
   for (const [ws2, q] of clients) if (q.zone === zone) send(ws2, { t:'host', zone, host: q.id === hid });
 }
@@ -91,6 +94,8 @@ wss.on('connection', (ws) => {
       const key = acctKey(m.name); const pin = String(m.pin||'').slice(0,8);
       if (!key || pin.length < 3) { send(ws, { t:'login_fail', reason:'Enter a name and a 4-digit PIN' }); return; }
       const acct = readAcct(key);
+      // one live session per character: refuse if that account is already connected
+      for (const q of clients.values()) { if (q !== player && q.account === key) { send(ws, { t:'login_fail', reason:'That hero is already logged in elsewhere' }); return; } }
       if (acct) {
         if (acct.pin !== pin) { send(ws, { t:'login_fail', reason:'Wrong PIN for that hero' }); return; }
         player.account = key; player.name = acct.name || m.name;
@@ -122,6 +127,11 @@ wss.on('connection', (ws) => {
       player.moving = !!m.moving;
       player.sw = m.sw?1:0;
       if (player.zone !== oldZone) { assignHost(oldZone); assignHost(player.zone); }
+    } else if (m.t === 'active') {
+      // foreground/background signal — a backgrounded host yields the zone to an active player
+      const was = player.inactive;
+      player.inactive = !m.active;
+      if (was !== player.inactive) assignHost(player.zone);
     } else if (m.t === 'enemies') {
       // only the zone host's snapshot is trusted; relay to everyone else in the zone
       if (zoneHost[player.zone] === player.id) {
