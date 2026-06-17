@@ -198,8 +198,28 @@ function simZone(zone, dt){
   if(zoneSpawnCd[zone]<=0){ zoneSpawnCd[zone]=srnd(2.5,4.5); spawnRandomMobAt(zone); }
 }
 function runServerBossAI(zone,e,tgt){
-  // broadcast a telegraphed AOE that every player in the zone sees + can be caught by
-  const out={ t:'saoe', zone, x:Math.round(tgt.x), y:Math.round(tgt.y), kind:e.bossAI };
+  // each boss has signature, telegraphed mechanics; clients render the cause/effect
+  const players=zonePlayers(zone);
+  const out={ t:'saoe', zone, kind:e.bossAI, x:Math.round(tgt.x), y:Math.round(tgt.y), bx:Math.round(e.x), by:Math.round(e.y), spots:[] };
+  if(e.bossAI==='lava'){
+    // lava geysers erupt under several players after a 1.6s tell
+    e.castCd=srnd(4,6);
+    const spots=[{x:Math.round(tgt.x),y:Math.round(tgt.y)}];
+    for(let i=0;i<Math.min(3,players.length);i++){ const p=players[(i+1)%players.length]; spots.push({x:Math.round(p.x+srnd(-30,30)),y:Math.round(p.y+srnd(-30,30))}); }
+    for(let i=0;i<2;i++) spots.push({x:Math.round(e.x+srnd(-90,90)),y:Math.round(e.y+srnd(-70,70))});
+    out.spots=spots; out.delay=1.6; out.r=46; out.dmg=Math.round(e.dmg*1.4);
+  } else if(e.bossAI==='void'){
+    // expanding void rifts centred on each player
+    e.castCd=srnd(4.5,6.5);
+    out.spots=players.map(p=>({x:Math.round(p.x),y:Math.round(p.y)}));
+    out.delay=1.8; out.r=64; out.dmg=Math.round(e.dmg*1.3);
+  } else if(e.bossAI==='quake'){
+    // ground slam → fissures crack outward from the boss toward the target
+    e.castCd=srnd(5,7);
+    const ang=Math.atan2(tgt.y-e.y, tgt.x-e.x);
+    const spots=[]; for(let i=1;i<=5;i++){ const d=i*42; spots.push({x:Math.round(e.x+Math.cos(ang)*d),y:Math.round(e.y+Math.sin(ang)*d)}); }
+    out.spots=spots; out.delay=1.4; out.r=40; out.dmg=Math.round(e.dmg*1.6); out.slam=1;
+  }
   for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
 }
 // apply a player's hit to a server mob; handle death + rewards broadcast
