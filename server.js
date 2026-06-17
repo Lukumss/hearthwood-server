@@ -83,9 +83,13 @@ function ingestZoneMap(zone, d){
   if(!d || !d.w || !d.h || !d.solid || !d.etypes) return;
   const solid = Uint8Array.from(d.solid);
   zoneMaps[zone] = { w:d.w, h:d.h, solid, spawns:d.spawns||[], maxMobs:d.maxMobs||0, level:d.level||1,
-                     bossSpawn:d.bossSpawn||null, campSpawns:d.campSpawns||[], playerSpawn:d.playerSpawn||{x:d.w*TILE/2,y:d.h*TILE/2}, etypes:d.etypes };
+                     bossSpawn:d.bossSpawn||null, campSpawns:d.campSpawns||[], playerSpawn:d.playerSpawn||{x:d.w*TILE/2,y:d.h*TILE/2}, etypes:d.etypes,
+                     bossSpawns:d.bossSpawns||null, partyScale:Math.max(1,Math.min(4, d.partyScale||1)), dungeon:!!d.dungeon };
   zoneMobs[zone] = [];
-  if((d.maxMobs||0) > 0){
+  if(d.bossSpawns && d.bossSpawns.length){
+    // dungeon: spawn each room boss, HP/damage scaled by party size
+    for(const b of d.bossSpawns){ const mob=spawnMob(zone, b.type, b.x, b.y, true, zoneMaps[zone].partyScale); if(mob){ mob.bossAI=b.bossAI||mob.bossAI; mob.room=b.room; } }
+  } else if((d.maxMobs||0) > 0){
     // boss + camp guards + an initial population
     if(d.bossSpawn) spawnMob(zone, d.bossSpawn.type, d.bossSpawn.x, d.bossSpawn.y, true);
     for(const c of (d.campSpawns||[])) spawnMob(zone, c.type||'mercenary', c.x, c.y, false);
@@ -93,13 +97,16 @@ function ingestZoneMap(zone, d){
     for(let i=0;i<initial;i++) spawnRandomMobAt(zone);
   }
 }
-function spawnMob(zone, type, x, y, isBoss){
+function spawnMob(zone, type, x, y, isBoss, bossScale){
   const map=zoneMaps[zone]; if(!map) return null;
   const t=map.etypes[type]; if(!t) return null;
   const lvl=map.level||1;
-  const scaleHp = isBoss?1:(1+(lvl-1)*0.6), scaleDmg = isBoss?1:(1+(lvl-1)*0.4);
+  const bs=isBoss?(bossScale||1):1;
+  const scaleHp = (isBoss? 1 : (1+(lvl-1)*0.6)) * bs;
+  const scaleDmg = (isBoss? (1+(bs-1)*0.25) : (1+(lvl-1)*0.4));
+  const baseHp = isBoss ? (t.hp*4) : t.hp;   // dungeon bosses are beefy (~1000 HP solo class)
   const mob={ id:'m'+(_mid++), type, x, y, homeX:x, homeY:y,
-    hp:Math.round(t.hp*scaleHp), maxHp:Math.round(t.hp*scaleHp), dmg:Math.round(t.dmg*scaleDmg),
+    hp:Math.round(baseHp*scaleHp), maxHp:Math.round(baseHp*scaleHp), dmg:Math.round(t.dmg*scaleDmg),
     speed:t.speed, speedBase:t.speed, range:t.range, atkspd:t.atkspd, aggro:t.aggro, xp:t.xp, gold:t.gold,
     scale:t.scale, boss:!!isBoss, atype:t.atype||'melee', flee:!!t.flee, mount:t.mount||null, elite:!!t.elite,
     dir:'down', state:'idle', atkCd:srnd(0,1), wanderT:0, vx:0, vy:0, stun:0, slow:0, lastHitBy:null,
@@ -350,6 +357,20 @@ wss.on('connection', (ws) => {
       partyBroadcast(party.id);
     } else if (m.t === 'party_leave') {
       leaveParty(player);
+    } else if (m.t === 'dungeon_start') {
+      // party leader instigates a dungeon run → ready-check to every member
+      const party = partyOf(player);
+      if (party && party.leader === player.id) {
+        party.ready = {}; party.dungeon = m.zone;
+        for (const mid of party.members){ const ws2 = wsById(mid); if (ws2) send(ws2, { t:'dungeon_check', zone:m.zone, leader:player.name }); }
+      } else if (!party) { send(ws, { t:'dungeon_go', zone:m.zone }); }   // solo → straight in
+    } else if (m.t === 'dungeon_ready') {
+      const party = partyOf(player);
+      if (party && party.ready){ party.ready[player.id] = true;
+        // tell everyone who's ready so far
+        for (const mid of party.members){ const ws2 = wsById(mid); if (ws2) send(ws2, { t:'dungeon_readystate', ready:party.members.filter(id=>party.ready[id]).length, total:party.members.length }); }
+        if (party.members.every(id => party.ready[id])){ for (const mid of party.members){ const ws2 = wsById(mid); if (ws2) send(ws2, { t:'dungeon_go', zone:party.dungeon }); } party.ready = {}; }
+      }
     } else if (m.t === 'loot_start') {
       // killer offers a dropped item to the party for a Need/Greed roll
       const party = partyOf(player);
