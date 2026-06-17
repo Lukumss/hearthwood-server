@@ -46,6 +46,17 @@ let nextId = 1;
 function send(ws, obj){ if (ws.readyState === 1) { try { ws.send(JSON.stringify(obj)); } catch (e) {} } }
 function broadcastPlots(){ const out = { t:'plots', map:plots }; for (const ws2 of clients.keys()) send(ws2, out); }
 function wsById(id){ for (const [ws, p] of clients) { if (p.id === id) return ws; } return null; }
+// ---- per-zone host election (one player simulates each zone's monsters) ----
+const zoneHost = {};   // zone -> player id
+function assignHost(zone){
+  if (!zone) return;
+  const inZone = [...clients.values()].filter(p => p.zone === zone);
+  if (inZone.length === 0) { delete zoneHost[zone]; return; }
+  const cur = zoneHost[zone];
+  if (!cur || !inZone.some(p => p.id === cur)) zoneHost[zone] = inZone[0].id;  // pick a new host
+  const hid = zoneHost[zone];
+  for (const [ws2, q] of clients) if (q.zone === zone) send(ws2, { t:'host', zone, host: q.id === hid });
+}
 // build a friend list with live online status for a player
 function sendFriendList(ws, player){
   const acct = readAcct(player.account) || {};
@@ -100,13 +111,38 @@ wss.on('connection', (ws) => {
       player.color  = m.color  || player.color;
       player.zone   = m.zone   || player.zone;
       if (m.look) player.look = m.look;
+      assignHost(player.zone);
     } else if (m.t === 'look') {
       if (m.look) player.look = m.look;
     } else if (m.t === 'state') {
+      const oldZone = player.zone;
       player.x = m.x; player.y = m.y;
       player.dir = m.dir || 'down';
       player.zone = m.zone || player.zone;
       player.moving = !!m.moving;
+      if (player.zone !== oldZone) { assignHost(oldZone); assignHost(player.zone); }
+    } else if (m.t === 'enemies') {
+      // only the zone host's snapshot is trusted; relay to everyone else in the zone
+      if (zoneHost[player.zone] === player.id) {
+        const out = { t:'enemies', list:m.list || [], proj:m.proj || [] };
+        for (const [ws2, q] of clients) if (q !== player && q.zone === player.zone) send(ws2, out);
+      }
+    } else if (m.t === 'hit') {
+      // a guest hit an enemy → forward to the host to apply authoritatively
+      const hid = zoneHost[player.zone]; const hws = hid && wsById(hid);
+      if (hws && hid !== player.id) send(hws, { t:'hit', id:m.id, dmg:m.dmg, crit:!!m.crit, by:player.id });
+    } else if (m.t === 'ekill') {
+      // host declares an enemy dead → tell everyone in the zone (killer rolls own loot/xp)
+      if (zoneHost[player.zone] === player.id) {
+        const out = { t:'ekill', id:m.id, by:m.by, boss:!!m.boss, type:m.type, xp:m.xp|0, x:m.x, y:m.y };
+        for (const [ws2, q] of clients) if (q.zone === player.zone) send(ws2, out);
+      }
+    } else if (m.t === 'ehit') {
+      // host: an enemy hit a specific guest → deliver the damage to them
+      if (zoneHost[player.zone] === player.id) {
+        const tws = wsById(m.target);
+        if (tws) send(tws, { t:'ehit', dmg:m.dmg|0, kind:m.kind||'melee' });
+      }
     } else if (m.t === 'claim') {
       // claim/upgrade a house plot. One home per player: free any other plot they hold.
       const gid = '' + m.gid, tier = '' + (m.tier || 'basic');
@@ -192,7 +228,9 @@ wss.on('connection', (ws) => {
     // final cloud save on disconnect (best effort)
     const tws = wsById(player.tradeWith); if (tws) send(tws, { t:'trade_cancel', reason:'The other player left' });
     const tp = tws && clients.get(tws); if (tp) tp.tradeWith = null;
+    const z = player.zone;
     clients.delete(ws);
+    assignHost(z);   // hand the zone's monsters to someone else
   });
   ws.on('error', () => clients.delete(ws));
 });
