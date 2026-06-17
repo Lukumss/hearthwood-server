@@ -138,6 +138,15 @@ function stepMobToward(map, o, tx, ty, speed, dt, hw, hh){
 // players present in a zone (targets)
 function zonePlayers(zone){ const a=[]; for(const p of clients.values()) if(p.zone===zone && !p.dead) a.push(p); return a; }
 function nearestPlayer(zone, x, y){ let best=null,bd=1e9; for(const p of zonePlayers(zone)){ const d=sdist(x,y,p.x,p.y); if(d<bd){bd=d;best=p;} } return best?{p:best,d:bd}:null; }
+// apply mob damage to a backgrounded player's server-side HP mirror; kill + announce if it drops
+function damageAwayPlayer(zone, p, dmg){
+  const real = Math.max(1, Math.round(dmg - (p.def||0)*0.6));
+  p.hp = (p.hp==null? (p.maxHp||100) : p.hp) - real;
+  if(p.hp <= 0 && !p.dead){
+    p.dead = true; p.deadAt = Date.now();
+    for(const [ws2,q] of clients) if(q.zone===zone) send(ws2, { t:'pdead', id:p.id, name:p.name });
+  }
+}
 
 // one simulation step for a zone (called from the tick)
 function simZone(zone, dt){
@@ -166,8 +175,10 @@ function simZone(zone, dt){
     if(e.state==='chase' && tgt){
       if(d>e.range*0.85){ stepMobToward(map,e,tgt.x,tgt.y,e.speed,dt,4,3); e.dir = Math.abs(tgt.x-e.x)>Math.abs(tgt.y-e.y)?(tgt.x<e.x?'left':'right'):(tgt.y<e.y?'up':'down'); }
       else if(e.atkCd<=0){ e.atkCd=1/e.atkspd; e.swing=0.2;
-        // deal damage to the target player (client applies to its own HP)
-        const tws=wsById(tgt.id); if(tws) send(tws, { t:'ehit', dmg:e.dmg, kind:e.atype });
+        // active players apply damage on their own client; AWAY players take it server-side so they can die
+        const tws=wsById(tgt.id);
+        if(tgt.inactive){ damageAwayPlayer(zone, tgt, e.dmg); }
+        else if(tws) send(tws, { t:'ehit', dmg:e.dmg, kind:e.atype });
       }
     } else {
       e.wanderT-=dt; if(e.wanderT<=0){ e.wanderT=srnd(1.5,3.5); e.vx=srnd(-1,1); e.vy=srnd(-1,1); }
@@ -268,11 +279,16 @@ wss.on('connection', (ws) => {
       player.zone = m.zone || player.zone;
       player.moving = !!m.moving;
       player.sw = m.sw?1:0;
+      if (m.hp != null) player.hp = m.hp;
+      if (m.maxHp != null) player.maxHp = m.maxHp;
+      if (m.def != null) player.def = m.def;
       if (player.zone !== oldZone) { assignHost(oldZone); assignHost(player.zone); }
     } else if (m.t === 'active') {
       // foreground/background signal — a backgrounded host yields the zone to an active player
       const was = player.inactive;
       player.inactive = !m.active;
+      // returning from away after dying there → tell the client to run its death/respawn
+      if (m.active && player.dead) { player.dead = false; const ws2 = wsById(player.id); if (ws2) send(ws2, { t:'youdied' }); }
       if (was !== player.inactive) assignHost(player.zone);
     } else if (m.t === 'zonemap') {
       // a client uploads the seed-deterministic collision grid + spawn data for a zone
@@ -400,7 +416,7 @@ setInterval(() => {
     for (const q of peers) {
       if (q.id === p.id) continue;
       list.push({ id:q.id, name:q.name, color:q.color, look:q.look,
-                  x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, moving:q.moving, sw:q.sw?1:0,
+                  x:Math.round(q.x), y:Math.round(q.y), dir:q.dir, moving:q.moving, sw:q.sw?1:0, dead:q.dead?1:0,
                   chat: q.chatUntil > now ? q.chat : null });
     }
     send(ws, { t:'players', zone:p.zone, here: peers.length, online: clients.size, list });
