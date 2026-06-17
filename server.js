@@ -225,6 +225,42 @@ function sendFriendList(ws, player){
   send(ws, { t:'social_list', friends });
 }
 
+// ============================================================
+//  PARTIES (up to 4) + shared Need/Greed loot rolls
+// ============================================================
+const parties = {};   // pid -> { id, leader, members:[playerId] }
+const lootRolls = {}; // rollId -> { item, members:[id], choices:{}, rolls:{}, zone, t }
+let _pid = 1, _rid = 1;
+function partyOf(p){ return p && p.party && parties[p.party] ? parties[p.party] : null; }
+function partyBroadcast(pid){
+  const party = parties[pid]; if(!party) return;
+  const roster = party.members.map(mid => { for(const q of clients.values()) if(q.id===mid) return { id:mid, name:q.name, color:q.color, leader:mid===party.leader }; return null; }).filter(Boolean);
+  for(const mid of party.members){ const ws2 = wsById(mid); if(ws2) send(ws2, { t:'party_state', members:roster }); }
+}
+function leaveParty(p){
+  const party = partyOf(p); if(!party) return;
+  party.members = party.members.filter(id => id !== p.id);
+  p.party = null;
+  if(party.members.length <= 1){ for(const mid of party.members){ const q=[...clients.values()].find(c=>c.id===mid); if(q){ q.party=null; const ws2=wsById(mid); if(ws2) send(ws2,{t:'party_state',members:[]}); } } delete parties[party.id]; }
+  else { if(party.leader===p.id) party.leader=party.members[0]; partyBroadcast(party.id); }
+  const ws=wsById(p.id); if(ws) send(ws,{t:'party_state',members:[]});
+}
+function resolveLootRoll(rollId){
+  const r = lootRolls[rollId]; if(!r || r.done) return; r.done = true;
+  // who needs / greeds (anyone who didn't answer counts as pass)
+  const need = r.members.filter(id => r.choices[id]==='need');
+  const greed = r.members.filter(id => r.choices[id]==='greed');
+  const pool = need.length ? need : greed;
+  const rolls = [];
+  let winner = null, best = -1;
+  for(const id of pool){ const roll = 1 + Math.floor(Math.random()*100); rolls.push({ id, roll, choice: need.length?'need':'greed' }); if(roll > best){ best = roll; winner = id; } }
+  const nameOf = id => { for(const q of clients.values()) if(q.id===id) return q.name; return '?'; };
+  const out = { t:'loot_award', rollId, item:r.item, winnerId:winner, winnerName: winner?nameOf(winner):null,
+                rolls: rolls.map(x=>({ name:nameOf(x.id), roll:x.roll, choice:x.choice })) };
+  for(const mid of r.members){ const ws2 = wsById(mid); if(ws2) send(ws2, out); }
+  delete lootRolls[rollId];
+}
+
 wss.on('connection', (ws) => {
   const id = 'u' + (nextId++);
   const player = { id, name:'Adventurer', color:'#7fd0ff', look:null,
@@ -300,6 +336,35 @@ wss.on('connection', (ws) => {
       // visual-only effect/projectile/slash — relay to everyone else in the zone
       const out = Object.assign({}, m);
       for (const [ws2, q] of clients) if (q !== player && q.zone === player.zone) send(ws2, out);
+    } else if (m.t === 'party_invite') {
+      const tws = wsById(m.to), tp = tws && clients.get(tws);
+      const party = partyOf(player);
+      if (tp && (!party || party.members.length < 4)) send(tws, { t:'party_invite', from:player.id, name:player.name });
+    } else if (m.t === 'party_accept') {
+      const iws = wsById(m.from), inviter = iws && clients.get(iws);
+      if (!inviter) return;
+      let party = partyOf(inviter);
+      if (!party) { const pid = 'pty'+(_pid++); party = parties[pid] = { id:pid, leader:inviter.id, members:[inviter.id] }; inviter.party = pid; }
+      if (party.members.length >= 4) { send(ws, { t:'party_full' }); return; }
+      if (!party.members.includes(player.id)) { leaveParty(player); party.members.push(player.id); player.party = party.id; }
+      partyBroadcast(party.id);
+    } else if (m.t === 'party_leave') {
+      leaveParty(player);
+    } else if (m.t === 'loot_start') {
+      // killer offers a dropped item to the party for a Need/Greed roll
+      const party = partyOf(player);
+      if (!party || party.members.length < 2 || !m.item) { send(ws, { t:'loot_solo', item:m.item }); return; }
+      const rollId = 'r'+(_rid++);
+      lootRolls[rollId] = { item:m.item, members:party.members.slice(), choices:{}, done:false };
+      const out = { t:'loot_roll', rollId, item:m.item, from:player.name };
+      for (const mid of party.members){ const ws2 = wsById(mid); if (ws2) send(ws2, out); }
+      setTimeout(()=>resolveLootRoll(rollId), 12000);   // auto-resolve if someone stalls
+    } else if (m.t === 'loot_choice') {
+      const r = lootRolls[m.rollId];
+      if (r && !r.done && r.members.includes(player.id)) {
+        r.choices[player.id] = (m.choice==='need'||m.choice==='greed') ? m.choice : 'pass';
+        if (r.members.every(id => r.choices[id] != null)) resolveLootRoll(m.rollId);
+      }
     } else if (m.t === 'claim') {
       // claim/upgrade a house plot. One home per player: free any other plot they hold.
       const gid = '' + m.gid, tier = '' + (m.tier || 'basic');
@@ -386,6 +451,7 @@ wss.on('connection', (ws) => {
     const tws = wsById(player.tradeWith); if (tws) send(tws, { t:'trade_cancel', reason:'The other player left' });
     const tp = tws && clients.get(tws); if (tp) tp.tradeWith = null;
     const z = player.zone;
+    leaveParty(player);
     clients.delete(ws);
     assignHost(z);   // hand the zone's monsters to someone else
   });
