@@ -220,9 +220,19 @@ function runServerBossAI(zone,e,tgt){
     const spots=[]; for(let i=1;i<=5;i++){ const d=i*42; spots.push({x:Math.round(e.x+Math.cos(ang)*d),y:Math.round(e.y+Math.sin(ang)*d)}); }
     out.spots=spots; out.delay=1.4; out.r=40; out.dmg=Math.round(e.dmg*1.6); out.slam=1;
   } else if(e.bossAI==='knight'){
-    // the Knight slams the ground → an expanding shockwave RING the party must outrun/jump the gap of
-    e.castCd=srnd(5,7); e.swing=0.4;
-    out.kind='shockwave'; out.delay=0.9; out.maxR=200; out.expand=1.1; out.dmg=Math.round(e.dmg*1.3);
+    e.kphase=(e.kphase||0)+1;
+    if(e.kphase%2===1){
+      // ground slam → expanding shockwave ring
+      e.castCd=srnd(5,6.5); e.swing=0.4;
+      out.kind='shockwave'; out.delay=0.9; out.maxR=200; out.expand=1.1; out.dmg=Math.round(e.dmg*1.3);
+    } else {
+      // flaming sword plunge → lava geysers erupt under the party
+      e.castCd=srnd(5,6.5); e.swing=0.4;
+      out.kind='lava';
+      const spots=[{x:Math.round(tgt.x),y:Math.round(tgt.y)}];
+      for(let i=0;i<Math.min(3,players.length);i++){ const p=players[(i+1)%players.length]; spots.push({x:Math.round(p.x+srnd(-26,26)),y:Math.round(p.y+srnd(-26,26))}); }
+      out.spots=spots; out.delay=1.5; out.r=46; out.dmg=Math.round(e.dmg*1.3);
+    }
   }
   for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
 }
