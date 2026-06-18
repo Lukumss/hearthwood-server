@@ -28,6 +28,13 @@ function acctPath(name){ return path.join(SAVE_DIR, acctKey(name) + '.json'); }
 function readAcct(name){ try { return JSON.parse(fs.readFileSync(acctPath(name), 'utf8')); } catch (e) { return null; } }
 function writeAcct(name, obj){ try { fs.writeFileSync(acctPath(name), JSON.stringify(obj)); return true; } catch (e) { return false; } }
 
+// ---- global shared lists (bug reports + wish list), visible to everyone ----
+function listsPath(){ return path.join(SAVE_DIR, '_lists.json'); }
+function readLists(){ try { return JSON.parse(fs.readFileSync(listsPath(), 'utf8')); } catch (e) { return { bugs:[], wishes:[] }; } }
+function writeLists(o){ try { fs.writeFileSync(listsPath(), JSON.stringify(o)); } catch (e) {} }
+let LISTS = readLists(); if(!LISTS.bugs) LISTS.bugs=[]; if(!LISTS.wishes) LISTS.wishes=[];
+function listsMsg(){ return { t:'lists', bugs:LISTS.bugs, wishes:LISTS.wishes }; }
+
 const PORT = process.env.PORT || 2567;       // hosts set PORT automatically
 const WORLD_SEED = 424242;                    // the whole realm grows from this — keep it fixed forever
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
@@ -347,6 +354,24 @@ wss.on('connection', (ws) => {
       player.zone   = m.zone   || player.zone;
       if (m.look) player.look = m.look;
       assignHost(player.zone);
+      send(ws, listsMsg());
+    } else if (m.t === 'list_get') {
+      send(ws, listsMsg());
+    } else if (m.t === 'list_add') {
+      const kind = m.kind==='wish' ? 'wishes' : 'bugs'; const arr = LISTS[kind];
+      const e = (m.entry && typeof m.entry==='object') ? m.entry : {};
+      const o = { id:'L'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
+        by:(''+(player.name||'Anon')).slice(0,16), ts:Date.now(), wip:false, done:false };
+      if(kind==='bugs'){ o.what=(''+(e.what||'')).slice(0,140); o.occur=(''+(e.occur||'')).slice(0,220); if(!o.what && !o.occur) return; }
+      else { o.title=(''+(e.title||'')).slice(0,90); o.body=(''+(e.body||'')).slice(0,1000); if(!o.title && !o.body) return; }
+      arr.unshift(o); if(arr.length>300) arr.length=300; writeLists(LISTS);
+      for (const ws2 of clients.keys()) send(ws2, listsMsg());
+    } else if (m.t === 'list_toggle') {
+      const kind = m.kind==='wish' ? 'wishes' : 'bugs'; const it=(LISTS[kind]||[]).find(x=>x.id===m.id);
+      if(it){ if(m.field==='wip'){ it.wip=!it.wip; if(it.wip) it.done=false; } else { it.done=!it.done; if(it.done) it.wip=false; } writeLists(LISTS); for (const ws2 of clients.keys()) send(ws2, listsMsg()); }
+    } else if (m.t === 'list_del') {
+      const kind = m.kind==='wish' ? 'wishes' : 'bugs'; LISTS[kind]=(LISTS[kind]||[]).filter(x=>x.id!==m.id); writeLists(LISTS);
+      for (const ws2 of clients.keys()) send(ws2, listsMsg());
     } else if (m.t === 'look') {
       if (m.look) player.look = m.look;
     } else if (m.t === 'state') {
