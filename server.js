@@ -15,6 +15,11 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const fs = require('fs');
 const path = require('path');
+// Phase 1: server-authoritative DAMAGE maths. Loaded defensively so a
+// missing/broken rules.js can NEVER crash boot or block login.
+let rules = null;
+try { rules = require('./rules'); console.log('rules.js loaded — server-authoritative damage ACTIVE'); }
+catch (e) { console.error('rules.js not loaded — damage falls back to clamped client value:', e.message); }
 
 // ---- durable player saves (Render Persistent Disk) ----
 // Render mounts your disk at the path you set; default to /data, fall back to a
@@ -40,7 +45,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'REVERTED-ORIGINAL-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE1-AUTHDMG-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -244,11 +249,21 @@ function runServerBossAI(zone,e,tgt){
   }
   for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
 }
-// apply a player's hit to a server mob; handle death + rewards broadcast
-function applyHitToMob(zone, id, dmg, crit, byId){
-  const mobs=zoneMobs[zone]; if(!mobs) return;
+// apply a player's hit to a server mob; handle death + rewards broadcast.
+// Phase 1: the SERVER rolls the damage from the player's own loadout — the
+// client's claimed dmg is ignored when we can compute it (only a clamped
+// fallback if rules.js or the loadout is unavailable). Signature unchanged
+// callers: we pass the player object so we know their gear/skills.
+function applyHitToMob(player, id, clientDmg){
+  const zone = player.zone; const mobs=zoneMobs[zone]; if(!mobs) return;
   const e=mobs.find(m=>m.id===id); if(!e) return;
-  e.hp-=dmg; e.lastHitBy=byId; e.state='chase'; e.hurt=0.12;
+  let dmg, crit=false;
+  if(rules && player.save && player.save.p){
+    const r = rules.rollHitDamage(player.save.p); dmg = r.dmg; crit = r.crit;
+  } else {
+    dmg = Math.max(1, Math.min(500, clientDmg|0));   // fail-safe clamp
+  }
+  e.hp-=dmg; e.lastHitBy=player.id; e.state='chase'; e.hurt=0.12;
   if(e.hp<=0){
     const idx=mobs.indexOf(e); if(idx>=0) mobs.splice(idx,1);
     const out={ t:'mdead', zone, id:e.id, by:e.lastHitBy, boss:!!e.boss, type:e.type, xp:e.xp|0, x:Math.round(e.x), y:Math.round(e.y) };
@@ -337,6 +352,7 @@ wss.on('connection', (ws) => {
       if (acct) {
         if (acct.pin !== pin) { send(ws, { t:'login_fail', reason:'Wrong PIN for that hero' }); return; }
         player.account = key; player.name = acct.name || m.name;
+        player.save = acct.save || null;   // Phase 1: keep loadout ref for server-side damage (NOT mutated)
         send(ws, { t:'login_ok', save: acct.save || null, isNew: !acct.save, name: player.name });
       } else {
         player.account = key; player.name = ('' + (m.name||'Hero')).slice(0,16);
@@ -345,6 +361,7 @@ wss.on('connection', (ws) => {
       }
     } else if (m.t === 'cloudsave') {
       if (player.account && m.save) {
+        player.save = m.save;   // Phase 1: refresh loadout ref (gear/skills) — stored to disk UNCHANGED below
         const acct = readAcct(player.account) || { name: player.name, pin: '0000' };
         acct.save = m.save; acct.name = player.name; acct.updated = Date.now();
         writeAcct(player.account, acct);
@@ -397,8 +414,9 @@ wss.on('connection', (ws) => {
       // a client uploads the seed-deterministic collision grid + spawn data for a zone
       ingestZoneMap(m.zone, m);
     } else if (m.t === 'hit') {
-      // a player damaged a server-owned mob → apply authoritatively
-      applyHitToMob(player.zone, m.id, m.dmg|0, !!m.crit, player.id);
+      // a player damaged a server-owned mob → SERVER rolls the real damage
+      // (m.dmg is only a clamped fallback if the server can't compute it)
+      applyHitToMob(player, m.id, m.dmg|0);
     } else if (m.t === 'fx') {
       // visual-only effect/projectile/slash — relay to everyone else in the zone
       const out = Object.assign({}, m);
@@ -575,3 +593,42 @@ setInterval(() => {
 }, TICK_MS);
 
 server.listen(PORT, () => console.log('Hearthwood server listening on port ' + PORT));
+
+// ============================================================
+//  PHASE 0 — rolling save backups (safety net).
+//  Every 6h, copy all account .json files into a timestamped
+//  folder under <SAVE_DIR>/_backups, keeping the newest 8 (=2 days).
+//  Entirely additive + wrapped in try/catch: a backup failure can
+//  NEVER affect login, saves, or the game loop. Restore from the
+//  Render Shell with:
+//     cp /data/_backups/<timestamp>/*.json /data/
+// ============================================================
+const BACKUP_DIR = path.join(SAVE_DIR, '_backups');
+const BACKUP_KEEP = 8;
+const BACKUP_EVERY_MS = 6 * 60 * 60 * 1000;   // 6 hours
+function runBackup(){
+  try {
+    fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g,'-');
+    const dest = path.join(BACKUP_DIR, stamp);
+    fs.mkdirSync(dest, { recursive: true });
+    let n = 0;
+    for (const f of fs.readdirSync(SAVE_DIR)) {
+      if (!f.endsWith('.json')) continue;                 // accounts + _lists.json
+      try { fs.copyFileSync(path.join(SAVE_DIR, f), path.join(dest, f)); n++; } catch (e) {}
+    }
+    // prune: keep only the newest BACKUP_KEEP backup folders
+    const folders = fs.readdirSync(BACKUP_DIR)
+      .filter(d => { try { return fs.statSync(path.join(BACKUP_DIR, d)).isDirectory(); } catch(e){ return false; } })
+      .sort();                                            // ISO timestamps sort chronologically
+    while (folders.length > BACKUP_KEEP) {
+      const old = folders.shift();
+      try { fs.rmSync(path.join(BACKUP_DIR, old), { recursive: true, force: true }); } catch (e) {}
+    }
+    console.log('[backup] wrote ' + n + ' files -> _backups/' + stamp);
+  } catch (e) {
+    console.error('[backup] failed (non-fatal):', e.message);
+  }
+}
+setTimeout(runBackup, 60 * 1000);                          // first backup 1 min after boot
+setInterval(runBackup, BACKUP_EVERY_MS);                   // then every 6 hours
