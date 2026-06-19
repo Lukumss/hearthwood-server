@@ -28,93 +28,6 @@ function acctPath(name){ return path.join(SAVE_DIR, acctKey(name) + '.json'); }
 function readAcct(name){ try { return JSON.parse(fs.readFileSync(acctPath(name), 'utf8')); } catch (e) { return null; } }
 function writeAcct(name, obj){ try { fs.writeFileSync(acctPath(name), JSON.stringify(obj)); return true; } catch (e) { return false; } }
 
-// ============================================================
-//  SAVE SANITISER — never trust a client-sent save.
-//  The whole game runs in the player's browser, so a tampered
-//  client can post any 'save' it likes. We can't make a
-//  client-authoritative character fully un-cheatable, but we CAN
-//  refuse overflow/garbage and clamp every value to a sane ceiling
-//  so nobody injects level 9999 / 9e99 gold / 999k-damage gear, and
-//  no oversized payload can bloat the disk. Returns a cleaned save,
-//  or null if the payload is unusable (caller then rejects it).
-// ============================================================
-const SAVE_LIMITS = {
-  maxBytes: 262144,                 // 256 KB serialised cap per save
-  level: 99, skill: 99,
-  xp: 5e8, gold: 1e9, skillPoints: 2000,
-  maxHp: 100000, baseDmg: 50000, totalKills: 1e7,
-  itemNum: 100000,                  // ceiling for any numeric field on an item
-  strLen: 240,                      // ceiling for any string field
-  inventory: 80, bank: 400, mounts: 60, pets: 60, skillBar: 12,
-  itemKeys: 48, itemDepth: 4, arr: 400,
-};
-function _num(v, max, min){ min = (min==null?0:min); v = Number(v); if(!isFinite(v)) return min; return Math.max(min, Math.min(max, v)); }
-function _int(v, max, min){ return Math.round(_num(v, max, min)); }
-function _str(v, max){ return (typeof v==='string') ? v.slice(0, max||SAVE_LIMITS.strLen) : ''; }
-// recursively clamp an arbitrary item/value: numbers capped, strings trimmed,
-// objects/arrays size- and depth-limited, functions/garbage dropped.
-function _scrub(v, depth){
-  if(depth > SAVE_LIMITS.itemDepth) return null;
-  if(v === null) return null;
-  const t = typeof v;
-  if(t === 'number'){ if(!isFinite(v)) return 0; return Math.max(-SAVE_LIMITS.itemNum, Math.min(SAVE_LIMITS.itemNum, v)); }
-  if(t === 'string') return v.slice(0, SAVE_LIMITS.strLen);
-  if(t === 'boolean') return v;
-  if(Array.isArray(v)){ const out=[]; for(let i=0;i<v.length && i<SAVE_LIMITS.arr;i++){ const s=_scrub(v[i], depth+1); if(s!==undefined) out.push(s); } return out; }
-  if(t === 'object'){ const out={}; let n=0; for(const k in v){ if(!Object.prototype.hasOwnProperty.call(v,k)) continue; if(n++ >= SAVE_LIMITS.itemKeys) break; if(k.length>40) continue; const s=_scrub(v[k], depth+1); if(s!==undefined) out[k]=s; } return out; }
-  return undefined;                 // functions, symbols, undefined → dropped
-}
-function _scrubList(arr, cap){ if(!Array.isArray(arr)) return []; const out=[]; for(let i=0;i<arr.length && i<cap;i++){ const s=_scrub(arr[i],1); if(s && typeof s==='object') out.push(s); } return out; }
-function sanitizeSave(raw){
-  if(!raw || typeof raw!=='object' || !raw.p || typeof raw.p!=='object') return null;
-  let bytes=0; try{ bytes = JSON.stringify(raw).length; }catch(e){ return null; }   // refuse circular / oversized
-  if(bytes > SAVE_LIMITS.maxBytes) return null;
-  const p = raw.p, L = SAVE_LIMITS;
-  const eqIn = (p.equip && typeof p.equip==='object') ? p.equip : {};
-  const equip = {};
-  for(const slot of ['weapon','armor','helm','ring','cosmetic','pet']){
-    const it = eqIn[slot]; equip[slot] = (it && typeof it==='object') ? _scrub(it,1) : null;
-  }
-  let skills = null;
-  if(p.skills && typeof p.skills==='object'){ skills={}; let n=0;
-    for(const k in p.skills){ if(n++>=40) break; const s=p.skills[k];
-      if(s && typeof s==='object') skills[k] = { level:_int(s.level, L.skill, 1), xp:_num(s.xp, L.xp, 0) }; } }
-  const out = { v:1, p:{
-    level: _int(p.level, L.level, 1),
-    xp: _num(p.xp, L.xp, 0), xpNext: _num(p.xpNext, L.xp, 1),
-    maxHp: _int(p.maxHp, L.maxHp, 1),
-    hp: _int(p.hp, L.maxHp, 0),
-    baseDmg: _num(p.baseDmg, L.baseDmg, 0),
-    gold: _int(p.gold, L.gold, 0),
-    skillPoints: _int(p.skillPoints, L.skillPoints, 0),
-    inventory: _scrubList(p.inventory, L.inventory),
-    bank: _scrubList(p.bank, L.bank),
-    equip,
-    mounts: _scrubList(p.mounts, L.mounts),
-    activeMount: (p.activeMount && typeof p.activeMount==='object') ? _scrub(p.activeMount,1) : (typeof p.activeMount==='string' ? _str(p.activeMount,40) : null),
-    petsOwned: Array.isArray(p.petsOwned) ? p.petsOwned.slice(0,L.pets).map(x=>_str(String(x),40)).filter(Boolean) : [],
-    searchedBarrels: (p.searchedBarrels && typeof p.searchedBarrels==='object') ? _scrub(p.searchedBarrels,1) : {},
-    skills,
-    skillBar: Array.isArray(p.skillBar) ? p.skillBar.slice(0,L.skillBar).map(x=> x==null ? null : _str(String(x),40)) : [],
-    unlocked: (p.unlocked && typeof p.unlocked==='object') ? _scrub(p.unlocked,1) : {},
-    bossKills: (p.bossKills && typeof p.bossKills==='object') ? _scrub(p.bossKills,1) : {},
-    zoneKills: (p.zoneKills && typeof p.zoneKills==='object') ? _scrub(p.zoneKills,1) : {},
-    totalKills: _int(p.totalKills, L.totalKills, 0),
-    gotStarterKit: !!p.gotStarterKit,
-    appearance: (p.appearance && typeof p.appearance==='object') ? _scrub(p.appearance,1) : {},
-    home: (p.home && typeof p.home==='object') ? _scrub(p.home,1) : null,
-    name: _str(p.name, 16),
-    zone: _str(p.zone, 32) || 'town',
-    x: _num(p.x, 1e5, -1e5), y: _num(p.y, 1e5, -1e5),
-    uid: _int(p.uid, 1e9, 0),
-  }};
-  if(out.p.hp > out.p.maxHp) out.p.hp = out.p.maxHp;   // can't have more HP than your max
-  return out;
-}
-
-// ---- login brute-force lockout (in-memory; per account key) ----
-const loginFails = new Map();   // key -> { n, until }
-
 // ---- global shared lists (bug reports + wish list), visible to everyone ----
 function listsPath(){ return path.join(SAVE_DIR, '_lists.json'); }
 function readLists(){ try { return JSON.parse(fs.readFileSync(listsPath(), 'utf8')); } catch (e) { return { bugs:[], wishes:[] }; } }
@@ -417,22 +330,13 @@ wss.on('connection', (ws) => {
       // name + 4-digit PIN. New name -> create account. Existing -> PIN must match.
       const key = acctKey(m.name); const pin = String(m.pin||'').slice(0,8);
       if (!key || pin.length < 3) { send(ws, { t:'login_fail', reason:'Enter a name and a 4-digit PIN' }); return; }
-      // brute-force lockout: too many wrong PINs on this account → cool off
-      const lf = loginFails.get(key);
-      if (lf && lf.until > Date.now()) { send(ws, { t:'login_fail', reason:'Too many wrong PINs — wait a minute and try again' }); return; }
       const acct = readAcct(key);
       // one live session per character: refuse if that account is already connected
       for (const q of clients.values()) { if (q !== player && q.account === key) { send(ws, { t:'login_fail', reason:'That hero is already logged in elsewhere' }); return; } }
       if (acct) {
-        if (acct.pin !== pin) {
-          const f = loginFails.get(key) || { n:0, until:0 };
-          f.n++; if (f.n >= 5) { f.until = Date.now() + 60000; f.n = 0; }   // 5 strikes → 60s lock
-          loginFails.set(key, f);
-          send(ws, { t:'login_fail', reason:'Wrong PIN for that hero' }); return;
-        }
-        loginFails.delete(key);
+        if (acct.pin !== pin) { send(ws, { t:'login_fail', reason:'Wrong PIN for that hero' }); return; }
         player.account = key; player.name = acct.name || m.name;
-        send(ws, { t:'login_ok', save: (acct.save ? (sanitizeSave(acct.save) || null) : null), isNew: !acct.save, name: player.name });
+        send(ws, { t:'login_ok', save: acct.save || null, isNew: !acct.save, name: player.name });
       } else {
         player.account = key; player.name = ('' + (m.name||'Hero')).slice(0,16);
         writeAcct(key, { name: player.name, pin, save: null, created: Date.now() });
@@ -440,15 +344,8 @@ wss.on('connection', (ws) => {
       }
     } else if (m.t === 'cloudsave') {
       if (player.account && m.save) {
-        // light per-player floor so a tampered client can't hammer the disk
-        const now = Date.now();
-        if (player._lastSave && now - player._lastSave < 750) return;
-        player._lastSave = now;
-        // NEVER trust the incoming save — validate + clamp every field first
-        const clean = sanitizeSave(m.save);
-        if (!clean) { send(ws, { t:'save_rejected' }); return; }
         const acct = readAcct(player.account) || { name: player.name, pin: '0000' };
-        acct.save = clean; acct.name = player.name; acct.updated = Date.now();
+        acct.save = m.save; acct.name = player.name; acct.updated = Date.now();
         writeAcct(player.account, acct);
       }
     } else if (m.t === 'join') {
