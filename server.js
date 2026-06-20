@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE2-ECON-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE2-ECON-BANK-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -512,12 +512,20 @@ wss.on('connection', (ws, req) => {
       else if (m.t === 'econ_unequip')   r = E.doUnequip(ec, m.slot);
       else if (m.t === 'econ_use')       r = E.doUse(ec, m.id);
       else if (m.t === 'econ_drop')      r = E.doDrop(ec, m.id);
+      else if (m.t === 'econ_deposit')   r = E.doDeposit(ec, m.id);
+      else if (m.t === 'econ_withdraw')  r = E.doWithdraw(ec, m.id);
+      else if (m.t === 'econ_depositall')r = E.doDepositAll(ec);
       else if (m.t === 'econ_shop') {
         // (re)generate this player's gear-shop stock for a vendor kind
         player.shopStock = player.shopStock || {};
         if (!player.shopStock[m.kind] || m.refresh) player.shopStock[m.kind] = E.genShopStock(m.kind, ec.level);
         send(ws, { t:'shopstock', kind:m.kind, stock:player.shopStock[m.kind] });
         return;
+      }
+      else if (m.t === 'econ_sync') {
+        // re-push authoritative state on demand (used to verify the client cannot
+        // fabricate progression — any local tamper is overwritten by this)
+        pushState(ws, player); return;
       }
       else if (m.t === 'econ_buygear') {
         const stock = (player.shopStock && player.shopStock[m.kind]) || null;
