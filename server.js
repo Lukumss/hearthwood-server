@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE2-ECON-BANK-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE4-TRADE-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -598,16 +598,45 @@ wss.on('connection', (ws, req) => {
         send(ws,  { t:'trade_start', other:{ id:tp.id, name:tp.name } });
         send(tws, { t:'trade_start', other:{ id:player.id, name:player.name } }); }
     } else if (m.t === 'trade_offer') {
-      player.tradeOffer = { items:(m.items||[]).slice(0,12), gold:Math.max(0, m.gold|0) }; player.tradeOK = false;
-      const tws = wsById(player.tradeWith), tp = tws && clients.get(tws);
-      if (tp) { tp.tradeOK = false; send(tws, { t:'trade_other', items:player.tradeOffer.items, gold:player.tradeOffer.gold }); send(ws, { t:'trade_otherconfirm', confirmed:false }); }
+      // Phase 4: when economy is authoritative, store only the offered item IDS
+      // (validated against real inventory at completion) — never client item objects.
+      if (economy && player.econ) {
+        const ids = (m.items||[]).map(it=>it && it.id).filter(Boolean).slice(0,12);
+        player.tradeOffer = { ids, gold: Math.max(0, m.gold|0) }; player.tradeOK = false;
+        const tws = wsById(player.tradeWith), tp = tws && clients.get(tws);
+        if (tp) { tp.tradeOK = false;
+          // show the partner the AUTHORITATIVE items for those ids (can't be faked)
+          const items = economy.resolveOfferItems(player.econ, player.tradeOffer);
+          send(tws, { t:'trade_other', items, gold:player.tradeOffer.gold });
+          send(ws,  { t:'trade_otherconfirm', confirmed:false }); }
+      } else {
+        player.tradeOffer = { items:(m.items||[]).slice(0,12), gold:Math.max(0, m.gold|0) }; player.tradeOK = false;
+        const tws = wsById(player.tradeWith), tp = tws && clients.get(tws);
+        if (tp) { tp.tradeOK = false; send(tws, { t:'trade_other', items:player.tradeOffer.items, gold:player.tradeOffer.gold }); send(ws, { t:'trade_otherconfirm', confirmed:false }); }
+      }
     } else if (m.t === 'trade_confirm') {
       player.tradeOK = !!m.confirmed;
       const tws = wsById(player.tradeWith), tp = tws && clients.get(tws);
       if (tp) { send(tws, { t:'trade_otherconfirm', confirmed:player.tradeOK });
         if (player.tradeOK && tp.tradeOK) {
-          send(ws,  { t:'trade_done', get:tp.tradeOffer, give:player.tradeOffer });
-          send(tws, { t:'trade_done', get:player.tradeOffer, give:tp.tradeOffer });
+          if (economy && player.econ && tp.econ) {
+            // Phase 4: SERVER performs the atomic swap against both real inventories.
+            const res = economy.executeTrade(player.econ, player.tradeOffer, tp.econ, tp.tradeOffer);
+            if (res.ok) {
+              saveEcon(player); saveEcon(tp);
+              pushState(ws, player); pushState(tws, tp);
+              send(ws,  { t:'trade_done', applied:true });
+              send(tws, { t:'trade_done', applied:true });
+            } else {
+              // an offer was invalid (item sold/dropped mid-trade) → abort, nothing moved
+              send(ws,  { t:'trade_cancel', reason:'Trade failed — an item was no longer available' });
+              send(tws, { t:'trade_cancel', reason:'Trade failed — an item was no longer available' });
+            }
+            player.tradeOK = false; tp.tradeOK = false;
+          } else {
+            send(ws,  { t:'trade_done', get:tp.tradeOffer, give:player.tradeOffer });
+            send(tws, { t:'trade_done', get:player.tradeOffer, give:tp.tradeOffer });
+          }
           player.tradeWith = null; tp.tradeWith = null;
         } }
     } else if (m.t === 'trade_cancel') {
