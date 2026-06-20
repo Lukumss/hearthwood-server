@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-GATHER-FIX-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-PARTYLOOT-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -338,9 +338,24 @@ function applyHitToMob(player, id, clientDmg){
     // kill-counts are handled client-side (self-progression, not duplicable).
     if(economy && player.econ){
       const reward = economy.grantKill(player.econ, e.type, zone);
+      // Phase 2 party loot: if the killer is in a party, GEAR drops go to a
+      // shared Need/Greed roll instead of straight to their bag (the winner gets
+      // it server-side). Non-gear (gold/consumables/cosmetics) stays with the killer.
+      let kept = reward.items;
+      const party = partyOf(player);
+      if(party && party.members.length >= 2 && reward.items.length){
+        kept = [];
+        for(const it of reward.items){
+          if(it && ['weapon','armor','helm','ring'].indexOf(it.kind) >= 0){
+            const idx = player.econ.inventory.findIndex(x=>x && x.id===it.id);
+            if(idx>=0) player.econ.inventory.splice(idx,1);
+            startLootRoll(player, it);
+          } else { kept.push(it); }
+        }
+      }
       const kws = wsById(player.id);
       if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss,
-        gold:reward.gold, items:reward.items });
+        gold:reward.gold, items:kept });
         pushState(kws, player); }
     }
   }
@@ -390,14 +405,33 @@ function resolveLootRoll(rollId){
   const need = r.members.filter(id => r.choices[id]==='need');
   const greed = r.members.filter(id => r.choices[id]==='greed');
   const pool = need.length ? need : greed;
-  const rolls = [];
-  let winner = null, best = -1;
+  const rolls = []; let best=-1, winner=null;
   for(const id of pool){ const roll = 1 + Math.floor(Math.random()*100); rolls.push({ id, roll, choice: need.length?'need':'greed' }); if(roll > best){ best = roll; winner = id; } }
   const nameOf = id => { for(const q of clients.values()) if(q.id===id) return q.name; return '?'; };
-  const out = { t:'loot_award', rollId, item:r.item, winnerId:winner, winnerName: winner?nameOf(winner):null,
+  // Phase 2: deliver the won item to the WINNER's authoritative inventory server-side
+  // (a client-side add would be wiped). Flag applied so the client doesn't double-add.
+  let applied = false;
+  if(economy && winner){
+    const wws = wsById(winner), wp = wws && clients.get(wws);
+    if(wp && wp.econ){ const it = Object.assign({}, r.item); it.id = economy.uid();
+      wp.econ.inventory.push(it); saveEcon(wp); pushState(wws, wp); applied = true; }
+  }
+  const out = { t:'loot_award', rollId, item:r.item, winnerId:winner, winnerName: winner?nameOf(winner):null, applied,
                 rolls: rolls.map(x=>({ name:nameOf(x.id), roll:x.roll, choice:x.choice })) };
   for(const mid of r.members){ const ws2 = wsById(mid); if(ws2) send(ws2, out); }
   delete lootRolls[rollId];
+}
+// Phase 2: start a party Need/Greed roll for an item the server just dropped to a
+// partied killer. Returns true if a roll started (caller already removed the item).
+function startLootRoll(killer, item){
+  const party = partyOf(killer);
+  if(!party || party.members.length < 2) return false;
+  const rollId = 'r'+(_rid++);
+  lootRolls[rollId] = { item, members: party.members.slice(), choices:{}, done:false };
+  const out = { t:'loot_roll', rollId, item, from:killer.name };
+  for(const mid of party.members){ const ws2 = wsById(mid); if(ws2) send(ws2, out); }
+  setTimeout(()=>resolveLootRoll(rollId), 12000);
+  return true;
 }
 
 wss.on('connection', (ws, req) => {
