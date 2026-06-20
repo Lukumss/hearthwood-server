@@ -112,6 +112,76 @@ function makeGear(baseKey, rarity, tier){
   return item;
 }
 function cloneConsumable(key){ const c=CONSUMABLES[key]; return c ? Object.assign({ id:uid() }, c) : null; }
+// ---- pets (forest barrel kittens) — server rolls + delivers to inventory ----
+const PET_NAMES = { marmalade:'Marmalade Kitten', smoke:'Smoke Kitten', inkwell:'Inkwell Kitten', snowpaw:'Snowpaw Kitten', patches:'Patches Kitten' };
+const PET_KEYS = Object.keys(PET_NAMES);
+function makePetItem(key){
+  const name = PET_NAMES[key] || PET_NAMES.marmalade;
+  return { id:uid(), kind:'pet', slot:'pet', petKey:key, name, icon:'pet:'+key, rarity:'epic',
+    value:0, cosmetic:true, desc:'A loyal kitten. Equip it and it follows you, fetching nearby loot.' };
+}
+// search a barrel: one kitten per barrel (server tracks which are searched so it
+// can't be farmed by repeat clicks). Delivers the kitten to authoritative inventory.
+function grantBarrel(econ, bkey){
+  if(!econ.searchedBarrels || typeof econ.searchedBarrels!=='object') econ.searchedBarrels={};
+  if(bkey && econ.searchedBarrels[bkey]) return { ok:false, err:'already searched' };
+  if(bkey) econ.searchedBarrels[bkey]=true;
+  const key = PET_KEYS[Math.floor(Math.random()*PET_KEYS.length)];
+  const item = makePetItem(key);
+  econ.inventory.push(item);
+  if(!Array.isArray(econ.petsOwned)) econ.petsOwned=[];
+  if(!econ.petsOwned.includes(key)) econ.petsOwned.push(key);
+  return { ok:true, key, name:item.name };
+}
+
+// ---- gathering / crafting / tools (server-built so they can't mint gear) ----
+const TOOL_NAMES = { axe:'Woodcutting Axe', pickaxe:'Pickaxe', rod:'Fishing Rod' };
+function makeToolItem(tool){
+  return { id:uid(), kind:'tool', tool, icon: tool==='axe'?'axe':tool==='pickaxe'?'pickaxe':'rod',
+    name:TOOL_NAMES[tool]||'Tool', value:5, rarity:'common', desc:'A gathering tool. Click a resource node to use it.' };
+}
+// the client gathered a SAFE low-value item (log/ore/raw fish). The server builds
+// it from a constrained spec — it can only ever be a material/fishraw, never gear.
+function giveSafe(econ, spec){
+  spec = spec || {}; const t = String(spec.type||'');
+  const nm = String(spec.name||'Item').slice(0,40);
+  const val = Math.max(1, Math.min(60, Math.round(num(spec.value))||4));
+  let item;
+  if(t==='material') item = { id:uid(), kind:'material', icon:String(spec.icon||'ore').slice(0,12), name:nm, value:val, rarity:'common', color:spec.color, desc:'A gathered material.' };
+  else if(t==='fishraw') item = { id:uid(), kind:'fishraw', icon:'fish', name:nm, value:val, rarity:'common',
+    heal:Math.max(0,Math.min(300,Math.round(num(spec.heal)))), cookReq:Math.max(1,Math.round(num(spec.cookReq))||1),
+    cookXp:Math.max(0,Math.round(num(spec.cookXp))), fishName:String(spec.fishName||'Fish').slice(0,30), desc:'Cook at a range to make it edible.' };
+  else return { ok:false, err:'bad type' };
+  econ.inventory.push(item);
+  return { ok:true, item };
+}
+// cook a raw fish the player actually owns: consume it, produce cooked or burnt.
+function doCook(econ, rawId){
+  const i = econ.inventory.findIndex(it=>it && it.id===rawId && it.kind==='fishraw');
+  if(i<0) return { ok:false, err:'no raw fish' };
+  const raw = econ.inventory[i]; econ.inventory.splice(i,1);
+  if(Math.random() < 0.95){
+    econ.inventory.push({ id:uid(), kind:'food', icon:'fishck', name:String(raw.fishName||'Fish').slice(0,30),
+      value:Math.max(3,Math.round(num(raw.heal)/3)), rarity:'common', heal:num(raw.heal), fishName:raw.fishName, desc:'Eat to heal.' });
+    return { ok:true, burnt:false, name:raw.fishName };
+  }
+  econ.inventory.push({ id:uid(), kind:'junk', icon:'fishburn', name:'Burnt Fish', value:0, rarity:'common', desc:'Oops. Inedible.' });
+  return { ok:true, burnt:true, name:raw.fishName };
+}
+function doBuyTool(econ, tool){
+  if(!TOOL_NAMES[tool]) return { ok:false, err:'bad tool' };
+  const price = 12;
+  if(num(econ.gold) < price) return { ok:false, err:'not enough gold' };
+  if(econ.inventory.some(it=>it&&it.kind==='tool'&&it.tool===tool)) return { ok:false, err:'already own' };
+  econ.gold -= price; econ.inventory.push(makeToolItem(tool));
+  return { ok:true, name:TOOL_NAMES[tool] };
+}
+function doStarterKit(econ){
+  if(econ.gotStarterKit) return { ok:false, err:'already taken' };
+  econ.gotStarterKit = true;
+  for(const t of ['axe','pickaxe','rod']) if(!econ.inventory.some(it=>it&&it.kind==='tool'&&it.tool===t)) econ.inventory.push(makeToolItem(t));
+  return { ok:true };
+}
 function randomCosmetic(){ const ks=Object.keys(COSMETICS); const k=ks[Math.floor(Math.random()*ks.length)]; return Object.assign({ id:uid(), kind:'cosmetic', slot:'cosmetic', value:500, cosmetic:true }, COSMETICS[k]); }
 function rollEnemyLoot(enemyType, zone){
   const et=ENEMY[enemyType]; if(!et) return null;
@@ -427,6 +497,7 @@ module.exports = {
   // authoritative economy actions (each returns {ok, err?, ...info}; mutates econ)
   doSell, doSellMany, doUpgrade, doBuyConsumable, doEquip, doUnequip, doUse, doDrop,
   doDeposit, doWithdraw, doDepositAll,
-  resolveOfferItems, executeTrade,
+  resolveOfferItems, executeTrade, grantBarrel,
+  giveSafe, doCook, doBuyTool, doStarterKit,
   genShopStock, doBuyGear,
 };
