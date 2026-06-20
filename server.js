@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-NEEDGREED-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-GROUNDROLL-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -342,22 +342,16 @@ function applyHitToMob(player, id, clientDmg){
       // Phase 2: items become GROUND DROPS (walk over to grab). If the killer is
       // in a party, GEAR instead goes to a shared Need/Greed roll.
       const party = partyOf(player);
-      // only party members PRESENT in this zone share loot / roll — someone off
-      // in another region doesn't get a kill they weren't there for.
       const present = party
         ? party.members.filter(id => { for(const q of clients.values()) if(q.id===id) return q.zone===zone; return false; })
         : [player.id];
-      const inParty = present.length >= 2;
-      const owners = inParty ? present.slice() : [player.id];
+      const owners = (present.length >= 2) ? present.slice() : [player.id];
+      // ALL loot drops on the ground so it's always visible. Picking up GEAR in a
+      // party triggers the Need/Greed roll (handled in econ_pickup); solo and
+      // non-gear are grabbed instantly.
       for(const it of reward.items){
-        if(inParty && it && ['weapon','armor','helm','ring'].indexOf(it.kind) >= 0){
-          // party GEAR → shared Need/Greed roll among present members
-          startLootRoll(player, it, present);
-        } else {
-          // solo loot, and party non-gear → drops on the ground for its owners
-          const ang = Math.random()*Math.PI*2, r = 8 + Math.random()*14;
-          addDrop(zone, it, e.x + Math.cos(ang)*r, e.y + Math.sin(ang)*r, owners);
-        }
+        const ang = Math.random()*Math.PI*2, r = 8 + Math.random()*14;
+        addDrop(zone, it, e.x + Math.cos(ang)*r, e.y + Math.sin(ang)*r, owners);
       }
       const kws = wsById(player.id);
       if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss, gold:reward.gold });
@@ -598,7 +592,19 @@ wss.on('connection', (ws, req) => {
           const d = arr[di];
           if (d.owners.indexOf(player.id) < 0) r = { ok:false, err:'not yours' };
           else if (Math.hypot((player.x||0)-d.x, (player.y||0)-d.y) > 48) r = { ok:false, err:'too far' };
-          else { arr.splice(di,1); const it = Object.assign({}, d.item); it.id = E.uid(); ec.inventory.push(it); r = { ok:true, item:it, dropId:d.id }; }
+          else {
+            // party GEAR pickup → trigger a Need/Greed roll among present owners
+            // instead of an instant grab. Solo / non-gear = instant.
+            const isGear = ['weapon','armor','helm','ring'].indexOf(d.item.kind) >= 0;
+            const presentOwners = d.owners.filter(id => { for(const q of clients.values()) if(q.id===id) return q.zone===player.zone; return false; });
+            if (isGear && presentOwners.length >= 2) {
+              arr.splice(di,1);
+              startLootRoll(player, d.item, presentOwners);
+              r = { ok:true, rolled:true };
+            } else {
+              arr.splice(di,1); const it = Object.assign({}, d.item); it.id = E.uid(); ec.inventory.push(it); r = { ok:true, item:it, dropId:d.id };
+            }
+          }
         }
       }
       else if (m.t === 'econ_shop') {
