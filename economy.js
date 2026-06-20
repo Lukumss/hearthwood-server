@@ -178,9 +178,17 @@ function gainXp(p, n){
 }
 
 // ---------- authoritative state container ----------
-// The list of progression fields the SERVER owns. Everything else in the
-// client save (position, appearance, settings) stays client-authored.
-const OWNED_FIELDS = ['level','xp','xpNext','hp','maxHp','baseDmg','gold','skillPoints',
+// CRITICAL SPLIT (fixes the level-up wipe):
+//  • OWNED_FIELDS = the dupe-risk ECONOMY the server overwrites + persists
+//    authoritatively (pushed in pstate, written to disk). These are the only
+//    fields the server sends back to the client, so it can never wipe anything
+//    else the client changes.
+//  • STATE_FIELDS = the broader set the server KEEPS A COPY of (needed for the
+//    damage formula), seeded at login + refreshed from each cloudsave, but NOT
+//    pushed back or overwritten. Self-progression (levels, skills, mounts, pet
+//    keys, kills) lives here and stays CLIENT-authored — so it is never reset.
+const OWNED_FIELDS = ['gold','inventory','equip','bank'];
+const STATE_FIELDS = ['level','xp','xpNext','hp','maxHp','baseDmg','gold','skillPoints',
   'inventory','equip','bank','mounts','activeMount','petsOwned','searchedBarrels',
   'skills','unlocked','bossKills','zoneKills','totalKills','gotStarterKit'];
 // Build the server's canonical econ object from a (client) save's player blob.
@@ -188,7 +196,7 @@ const OWNED_FIELDS = ['level','xp','xpNext','hp','maxHp','baseDmg','gold','skill
 function fromSave(p){
   p = p || {};
   const econ = {};
-  for(const f of OWNED_FIELDS) econ[f] = p[f];
+  for(const f of STATE_FIELDS) econ[f] = p[f];
   // sane defaults / repairs
   econ.level = Math.max(1, Math.round(num(econ.level)||1));
   econ.xp = Math.max(0, num(econ.xp));
@@ -214,37 +222,47 @@ function fromSave(p){
   return econ;
 }
 // Merge the server's owned fields back over a client save before persisting,
-// so the disk copy always reflects authoritative progression while keeping the
-// client's position/appearance/etc. Returns a new save object.
+// so the disk copy reflects authoritative ECONOMY while keeping the client's
+// self-progression (levels/skills/mounts/kills) and position/appearance intact.
 function mergeIntoSave(clientSave, econ){
   const save = (clientSave && typeof clientSave==='object') ? clientSave : { v:1, p:{} };
   if(!save.p || typeof save.p!=='object') save.p = {};
   for(const f of OWNED_FIELDS) save.p[f] = econ[f];
   return save;
 }
+// Refresh the server's COPY of client-owned, damage-relevant fields from a
+// fresh cloudsave, so server-side damage stays accurate as the player levels
+// skills client-side. Never touches OWNED_FIELDS (those stay authoritative).
+function refreshState(econ, p){
+  if(!p || typeof p!=='object') return;
+  if('baseDmg' in p) econ.baseDmg = num(p.baseDmg);
+  if('level' in p)   econ.level   = num(p.level);
+  if('maxHp' in p)   econ.maxHp   = num(p.maxHp);
+  if(p.skills   && typeof p.skills==='object')   econ.skills   = p.skills;
+  if(p.unlocked && typeof p.unlocked==='object') econ.unlocked = p.unlocked;
+}
 
 // ---------- the one authoritative mutation we wire first: a kill ----------
 // Grants gold + XP + (maybe) loot for killing `enemyType` in `zone`, mutating
 // econ in place. Returns a summary the client renders (floats, toasts, drops).
+// ---------- kill rewards: ECONOMY ONLY ----------
+// The server grants only the dupe-risk rewards: GOLD and ITEMS (loot/cosmetics/
+// boss drops) straight into the authoritative inventory. XP, levels, skill XP,
+// mount taming and kill-counts are SELF-progression and are handled by the
+// client (they can't be duplicated), so the server never touches them here —
+// that's what stops the level-up wipe.
 function grantKill(econ, enemyType, zone){
-  const et = ENEMY[enemyType] || { gold:[1,3], xp:5, dropChance:0.3 };
-  const out = { gold:0, xp:0, items:[], mount:null, cosmetic:false, boss:!!et.boss };
-  econ.totalKills = num(econ.totalKills)+1;
-  econ.zoneKills[zone] = num(econ.zoneKills[zone])+1;
+  const et = ENEMY[enemyType] || { gold:[1,3], dropChance:0.3 };
+  const out = { gold:0, items:[], boss:!!et.boss };
   // gold
   const gold = ri(et.gold[0], et.gold[1]); econ.gold = num(econ.gold)+gold; out.gold = gold;
-  // account xp
-  gainXp(econ, et.xp); out.xp = et.xp;
   // loot
   const loot = rollEnemyLoot(enemyType, zone);
   if(loot){ econ.inventory.push(loot); out.items.push(loot); }
-  // mount tame
-  const mid = et.mount;
-  if(mid && !econ.mounts.includes(mid)){ econ.mounts.push(mid); out.mount = mid; }
-  // elite / boss extras
-  if(et.elite || et.cosmeticDrop){ const cos=randomCosmetic(); econ.inventory.push(cos); out.items.push(cos); out.cosmetic=true;
+  // elite / boss item extras
+  if(et.elite || et.cosmeticDrop){ const cos=randomCosmetic(); econ.inventory.push(cos); out.items.push(cos);
     const extra=rollEnemyLoot(enemyType,zone); if(extra){ econ.inventory.push(extra); out.items.push(extra); } }
-  if(et.boss){ econ.bossKills[zone]=true;
+  if(et.boss){
     const g=cloneConsumable('gem'), pot=cloneConsumable('potion_major');
     econ.inventory.push(g, pot); out.items.push(g, pot);
     const extra=rollEnemyLoot(enemyType,zone); if(extra){ econ.inventory.push(extra); out.items.push(extra); } }
@@ -401,7 +419,7 @@ function doBuyGear(econ, stock, id){
 }
 
 module.exports = {
-  OWNED_FIELDS, fromSave, mergeIntoSave, grantKill,
+  OWNED_FIELDS, STATE_FIELDS, fromSave, mergeIntoSave, refreshState, grantKill,
   rollEnemyLoot, makeGear, cloneConsumable, randomCosmetic, sellValue, upgradeCost,
   effectiveDamage, rollHitDamage, weaponDamage, skillLvl,
   addSkillXp, awardCombatXp, gainXp, skillNeed, ri, uid,
