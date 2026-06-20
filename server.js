@@ -45,7 +45,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE1-ORIGINLOCK-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE1-STAGINGFIX-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -66,13 +66,20 @@ const clients = new Map();   // ws -> player
 // ============================================================
 const ALLOWED_ORIGINS = [
   'remarkable-dolphin-6fd98b.netlify.app',   // live site
+  'symphonious-marshmallow-3e0cad.netlify.app', // staging test client
   'localhost',                               // local dev
   '127.0.0.1',                               // local dev
 ];
+// STAGING servers (this branch) also accept any *.netlify.app drop-deploy so
+// the throwaway test client connects no matter what URL Netlify assigns.
+// Detected via RENDER_SERVICE_NAME containing "staging" (set automatically by
+// Render) or the STAGING env var. The LIVE service stays strictly locked.
+const IS_STAGING = /staging/i.test(process.env.RENDER_SERVICE_NAME || '') || process.env.STAGING === '1';
 function originAllowed(origin){
   if(!origin) return true;                   // no-origin (dev tools / native) — allow
   try {
     const host = new URL(origin).hostname;
+    if(IS_STAGING && host.endsWith('.netlify.app')) return true;   // staging: any netlify deploy
     return ALLOWED_ORIGINS.some(a => host === a || host.endsWith('.' + a));
   } catch(e){ return true; }                 // unparseable — don't risk locking out
 }
