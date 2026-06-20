@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-GROUNDROLL-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-AOE-FIX-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -317,10 +317,15 @@ function applyHitToMob(player, id, clientDmg){
   const loadout = (economy && player.econ) ? player.econ : (player.save && player.save.p);
   const wpn = loadout && loadout.equip && loadout.equip.weapon;
   const atkSpeed = (wpn && Number(wpn.speed)) || 1.4;            // attacks/sec
-  const minGap = (1 / atkSpeed) * 0.55 * 1000;                   // ms floor between hits
+  const minGap = (1 / atkSpeed) * 0.55 * 1000;                   // ms floor between hits ON THE SAME mob
   const now = Date.now();
-  if (player._lastHitT && (now - player._lastHitT) < minGap) return;   // too fast — ignore
-  player._lastHitT = now;
+  // Per-MOB cadence: a player can hit many different mobs at once (AoE skills),
+  // but can't hammer a SINGLE mob faster than the weapon allows. (A per-player
+  // gate broke AoE — every target was hit in the same instant and all but the
+  // first hit got dropped.)
+  if(!e.hitAt) e.hitAt = {};
+  if ((now - (e.hitAt[player.id] || 0)) < minGap) return;
+  e.hitAt[player.id] = now;
   let dmg, crit=false;
   // Phase 2: damage rolls from the AUTHORITATIVE econ loadout (server-owned),
   // not the client-authored save — closes the "cloud-save a fake weapon" hole.
