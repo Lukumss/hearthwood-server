@@ -341,6 +341,48 @@ function doDepositAll(econ){
   econ.inventory=keep;
   return { ok:true, count:move.length };
 }
+
+// ---- trade escrow (Phase 4): the server validates BOTH offers against the
+// authoritative inventories and performs an atomic swap. Items must really be
+// owned (in econ.inventory, not equipped); gold must really be held. An offer
+// is { ids:[itemId...], gold:Number }. Nothing mutates unless BOTH sides pass.
+function resolveOfferItems(econ, offer){
+  // best-effort: real item objects for the ids the player claims to offer
+  // (used to SHOW the other player an authoritative preview)
+  const ids=(offer&&offer.ids)||[];
+  return ids.map(id=>econ.inventory.find(x=>x&&x.id===id)).filter(Boolean);
+}
+function _validateOffer(econ, offer){
+  const gold=Math.max(0, Math.round(num(offer&&offer.gold)));
+  if(gold>num(econ.gold)) return { ok:false, err:'not enough gold' };
+  const ids=(offer&&offer.ids)||[];
+  if(!Array.isArray(ids)) return { ok:false, err:'bad offer' };
+  if(ids.length>12) return { ok:false, err:'too many items' };
+  const items=[]; const seen=new Set();
+  for(const id of ids){
+    if(seen.has(id)) return { ok:false, err:'duplicate item' };
+    seen.add(id);
+    const it=econ.inventory.find(x=>x&&x.id===id);
+    if(!it) return { ok:false, err:'item not owned' };
+    if(it.kind==='tool') return { ok:false, err:'cannot trade tools' };
+    items.push(it);
+  }
+  return { ok:true, items, gold };
+}
+function executeTrade(econA, offerA, econB, offerB){
+  const a=_validateOffer(econA, offerA); if(!a.ok) return { ok:false, who:'A', err:a.err };
+  const b=_validateOffer(econB, offerB); if(!b.ok) return { ok:false, who:'B', err:b.err };
+  // remove offered items from each giver (atomic — both already validated)
+  for(const it of a.items){ const i=econA.inventory.indexOf(it); if(i>=0) econA.inventory.splice(i,1); _unequipRefs(econA,it); }
+  for(const it of b.items){ const i=econB.inventory.indexOf(it); if(i>=0) econB.inventory.splice(i,1); _unequipRefs(econB,it); }
+  // transfer gold
+  econA.gold=num(econA.gold)-a.gold+b.gold;
+  econB.gold=num(econB.gold)-b.gold+a.gold;
+  // deliver items to receivers with fresh server ids
+  for(const it of a.items){ const c=Object.assign({}, it); c.id=uid(); econB.inventory.push(c); }
+  for(const it of b.items){ const c=Object.assign({}, it); c.id=uid(); econA.inventory.push(c); }
+  return { ok:true, aGave:a.items.length, bGave:b.items.length, aGold:a.gold, bGold:b.gold };
+}
 // server-owned gear-shop stock (port of genShopStock) so buys are validated
 const SHOP_BASES = { sword:['dagger','sword','axe'], mage:['staff','staff','ring'], armor:['armor_leather','armor_plate','helm','ring'] };
 function genShopStock(kind, level){
@@ -367,5 +409,6 @@ module.exports = {
   // authoritative economy actions (each returns {ok, err?, ...info}; mutates econ)
   doSell, doSellMany, doUpgrade, doBuyConsumable, doEquip, doUnequip, doUse, doDrop,
   doDeposit, doWithdraw, doDepositAll,
+  resolveOfferItems, executeTrade,
   genShopStock, doBuyGear,
 };
