@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-PARTY-GROUNDLOOT-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-MAPFIX-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -135,6 +135,7 @@ const TILE = 16;
 const zoneMaps = {};   // zone -> { w,h,solid:Uint8Array, spawns, maxMobs, level, bossSpawn, campSpawns, playerSpawn, etypes }
 const zoneMobs = {};   // zone -> [ mob ]
 const zoneSpawnCd = {};
+const zoneAskCd = {};   // zone -> seconds until we re-ask an occupant to upload its map
 let _mid = 1;
 function srnd(a,b){ return a + Math.random()*(b-a); }
 function sri(a,b){ return Math.floor(a + Math.random()*(b-a+1)); }
@@ -796,9 +797,16 @@ setInterval(() => {
   for (const zone in byZone) {
     if (zoneMaps[zone]) simZone(zone, dt);
     else {
-      // no map yet — ask one occupant to upload the seed-deterministic grid
-      const asker = byZone[zone][0];
-      if (asker && !asker._askedMap) { asker._askedMap = true; const ws = wsById(asker.id); if (ws) send(ws, { t:'needmap', zone }); }
+      // no map yet — ask an occupant to upload it, and RE-ASK every few seconds
+      // (per ZONE, not per player) until the map actually arrives. The old
+      // per-player flag got stuck after the first zone, leaving every other
+      // zone (and dungeons) map-less and therefore empty of enemies.
+      zoneAskCd[zone] = (zoneAskCd[zone] || 0) - dt;
+      if (zoneAskCd[zone] <= 0) {
+        zoneAskCd[zone] = 3;
+        const asker = byZone[zone][0];
+        const aws = asker && wsById(asker.id); if (aws) send(aws, { t:'needmap', zone });
+      }
     }
   }
 
@@ -823,7 +831,7 @@ setInterval(() => {
   }
 
   // free mobs/maps for zones nobody is in (so they re-seed fresh next time)
-  for (const zone in zoneMobs) { if (!byZone[zone]) { delete zoneMobs[zone]; delete zoneMaps[zone]; for (const p of clients.values()) p._askedMap = false; } }
+  for (const zone in zoneMobs) { if (!byZone[zone]) { delete zoneMobs[zone]; delete zoneMaps[zone]; delete zoneAskCd[zone]; } }
 }, TICK_MS);
 
 server.listen(PORT, () => console.log('Hearthwood server listening on port ' + PORT));
