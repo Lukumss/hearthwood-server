@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-AOE-FIX-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-PICKUP-FIX-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -596,7 +596,7 @@ wss.on('connection', (ws, req) => {
         else {
           const d = arr[di];
           if (d.owners.indexOf(player.id) < 0) r = { ok:false, err:'not yours' };
-          else if (Math.hypot((player.x||0)-d.x, (player.y||0)-d.y) > 48) r = { ok:false, err:'too far' };
+          else if (Math.hypot((player.x||0)-d.x, (player.y||0)-d.y) > 110) r = { ok:false, err:'too far' };
           else {
             // party GEAR pickup → trigger a Need/Greed roll among present owners
             // instead of an instant grab. Solo / non-gear = instant.
