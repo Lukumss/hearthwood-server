@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE4-TRADE-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-CADENCE-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -309,10 +309,20 @@ function runServerBossAI(zone,e,tgt){
 function applyHitToMob(player, id, clientDmg){
   const zone = player.zone; const mobs=zoneMobs[zone]; if(!mobs) return;
   const e=mobs.find(m=>m.id===id); if(!e) return;
+  // Phase 6: ATTACK-CADENCE GATE. The client limits attacks to 1/weaponSpeed
+  // seconds apart; the server enforces the same so a scripted client can't
+  // machine-gun hits. We allow generous leeway (55%) so latency/jitter never
+  // blocks legit play, but anything firing >~1.8x the weapon's rate is dropped.
+  const loadout = (economy && player.econ) ? player.econ : (player.save && player.save.p);
+  const wpn = loadout && loadout.equip && loadout.equip.weapon;
+  const atkSpeed = (wpn && Number(wpn.speed)) || 1.4;            // attacks/sec
+  const minGap = (1 / atkSpeed) * 0.55 * 1000;                   // ms floor between hits
+  const now = Date.now();
+  if (player._lastHitT && (now - player._lastHitT) < minGap) return;   // too fast — ignore
+  player._lastHitT = now;
   let dmg, crit=false;
   // Phase 2: damage rolls from the AUTHORITATIVE econ loadout (server-owned),
   // not the client-authored save — closes the "cloud-save a fake weapon" hole.
-  const loadout = (economy && player.econ) ? player.econ : (player.save && player.save.p);
   if(rules && loadout){
     const r = rules.rollHitDamage(loadout); dmg = r.dmg; crit = r.crit;
   } else {
