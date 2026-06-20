@@ -319,6 +319,28 @@ function doDrop(econ, id){
   const item=econ.inventory[i]; econ.inventory.splice(i,1); _unequipRefs(econ,item);
   return { ok:true, item };
 }
+// ---- bank (server-owned: inventory <-> bank moves must be validated too,
+// because the server now owns both arrays; client-side moves would be reverted) ----
+function doDeposit(econ, id){
+  const i=_findInv(econ,id); if(i<0) return { ok:false, err:'no item' };
+  if(!Array.isArray(econ.bank)) econ.bank=[];
+  const item=econ.inventory[i]; econ.inventory.splice(i,1); _unequipRefs(econ,item); econ.bank.push(item);
+  return { ok:true, name:item.name };
+}
+function doWithdraw(econ, id){
+  if(!Array.isArray(econ.bank)) econ.bank=[];
+  const i=econ.bank.findIndex(it=>it&&it.id===id); if(i<0) return { ok:false, err:'no item' };
+  const item=econ.bank[i]; econ.bank.splice(i,1); econ.inventory.push(item);
+  return { ok:true, name:item.name };
+}
+function doDepositAll(econ){
+  if(!Array.isArray(econ.bank)) econ.bank=[];
+  const keep=econ.inventory.filter(it=>it&&it.kind==='potion');
+  const move=econ.inventory.filter(it=>it&&it.kind!=='potion');
+  for(const it of move){ _unequipRefs(econ,it); econ.bank.push(it); }
+  econ.inventory=keep;
+  return { ok:true, count:move.length };
+}
 // server-owned gear-shop stock (port of genShopStock) so buys are validated
 const SHOP_BASES = { sword:['dagger','sword','axe'], mage:['staff','staff','ring'], armor:['armor_leather','armor_plate','helm','ring'] };
 function genShopStock(kind, level){
@@ -344,5 +366,6 @@ module.exports = {
   ENEMY, ZONE_LOOT, CONSUMABLES,
   // authoritative economy actions (each returns {ok, err?, ...info}; mutates econ)
   doSell, doSellMany, doUpgrade, doBuyConsumable, doEquip, doUnequip, doUse, doDrop,
+  doDeposit, doWithdraw, doDepositAll,
   genShopStock, doBuyGear,
 };
