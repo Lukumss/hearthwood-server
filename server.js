@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-CADENCE-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-FIX-PROGRESS-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -333,13 +333,14 @@ function applyHitToMob(player, id, clientDmg){
     const idx=mobs.indexOf(e); if(idx>=0) mobs.splice(idx,1);
     const out={ t:'mdead', zone, id:e.id, by:e.lastHitBy, boss:!!e.boss, type:e.type, xp:e.xp|0, x:Math.round(e.x), y:Math.round(e.y) };
     for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
-    // Phase 2: the SERVER grants the kill reward (gold/XP/loot) to the killer
-    // and pushes authoritative state — the client no longer rolls its own.
+    // Phase 2: the SERVER grants only the ECONOMY reward (gold + items) to the
+    // killer and pushes authoritative inventory/gold. XP, level, mount tame and
+    // kill-counts are handled client-side (self-progression, not duplicable).
     if(economy && player.econ){
       const reward = economy.grantKill(player.econ, e.type, zone);
       const kws = wsById(player.id);
       if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss,
-        gold:reward.gold, xp:reward.xp, items:reward.items, mount:reward.mount, cosmetic:reward.cosmetic });
+        gold:reward.gold, items:reward.items });
         pushState(kws, player); }
     }
   }
@@ -450,7 +451,8 @@ wss.on('connection', (ws, req) => {
         if (economy && player.econ) {
           // Phase 2: server owns progression. Take the client's non-owned fields
           // (position, appearance, settings) but OVERRIDE owned fields with our
-          // authoritative econ — the client cannot author gold/XP/inventory.
+          // authoritative econ — the client cannot author gold/items/equip/bank.
+          economy.refreshState(player.econ, m.save.p);   // keep server's damage inputs (skills/baseDmg) current
           acct.save = economy.mergeIntoSave(m.save, player.econ);
         } else {
           acct.save = m.save;   // Phase 1 path: stored UNCHANGED
