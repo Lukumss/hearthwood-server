@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-FIX-PROGRESS-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-GATHER-FIX-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -527,6 +527,11 @@ wss.on('connection', (ws, req) => {
       else if (m.t === 'econ_deposit')   r = E.doDeposit(ec, m.id);
       else if (m.t === 'econ_withdraw')  r = E.doWithdraw(ec, m.id);
       else if (m.t === 'econ_depositall')r = E.doDepositAll(ec);
+      else if (m.t === 'econ_barrel')    r = E.grantBarrel(ec, m.bkey);
+      else if (m.t === 'econ_give')      r = E.giveSafe(ec, m.spec);
+      else if (m.t === 'econ_cook')      r = E.doCook(ec, m.id);
+      else if (m.t === 'econ_buytool')   r = E.doBuyTool(ec, m.tool);
+      else if (m.t === 'econ_starterkit')r = E.doStarterKit(ec);
       else if (m.t === 'econ_shop') {
         // (re)generate this player's gear-shop stock for a vendor kind
         player.shopStock = player.shopStock || {};
