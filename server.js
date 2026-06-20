@@ -69,10 +69,16 @@ const ALLOWED_ORIGINS = [
   'localhost',                               // local dev
   '127.0.0.1',                               // local dev
 ];
+// STAGING servers (this branch) also accept any *.netlify.app drop-deploy so
+// the throwaway test client connects no matter what URL Netlify assigns.
+// Detected via RENDER_SERVICE_NAME containing "staging" (set automatically by
+// Render) or the STAGING env var. The LIVE service stays strictly locked.
+const IS_STAGING = /staging/i.test(process.env.RENDER_SERVICE_NAME || '') || process.env.STAGING === '1';
 function originAllowed(origin){
   if(!origin) return true;                   // no-origin (dev tools / native) — allow
   try {
     const host = new URL(origin).hostname;
+    if(IS_STAGING && host.endsWith('.netlify.app')) return true;   // staging: any netlify deploy
     return ALLOWED_ORIGINS.some(a => host === a || host.endsWith('.' + a));
   } catch(e){ return true; }                 // unparseable — don't risk locking out
 }
