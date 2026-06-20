@@ -45,7 +45,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE1-AUTHDMG-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE1-ORIGINLOCK-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -53,6 +53,29 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 const clients = new Map();   // ws -> player
+
+// ============================================================
+//  ORIGIN LOCK (anti-clone guest list).
+//  A browser tells us which website a connection comes from via the
+//  Origin header (can't be spoofed by an ordinary web page). We only
+//  accept our own site(s); a cloned client hosted elsewhere is hung
+//  up on. Connections with NO origin (your own dev tools, native
+//  clients) are allowed so we never lock ourselves out. Every reject
+//  is logged, never crashes anything.
+//  Add domains to ALLOWED_ORIGINS as needed (e.g. a custom domain).
+// ============================================================
+const ALLOWED_ORIGINS = [
+  'remarkable-dolphin-6fd98b.netlify.app',   // live site
+  'localhost',                               // local dev
+  '127.0.0.1',                               // local dev
+];
+function originAllowed(origin){
+  if(!origin) return true;                   // no-origin (dev tools / native) — allow
+  try {
+    const host = new URL(origin).hostname;
+    return ALLOWED_ORIGINS.some(a => host === a || host.endsWith('.' + a));
+  } catch(e){ return true; }                 // unparseable — don't risk locking out
+}
 const plots = {};            // gid -> { name, tier, ownerId }  (house ownership)
 let nextId = 1;
 
@@ -325,7 +348,14 @@ function resolveLootRoll(rollId){
   delete lootRolls[rollId];
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  // origin lock: refuse cloned clients hosted on other domains
+  const origin = req && req.headers && req.headers.origin;
+  if(!originAllowed(origin)){
+    console.warn('[origin-lock] refused connection from:', origin);
+    try { ws.close(4003, 'origin not allowed'); } catch(e){}
+    return;
+  }
   const id = 'u' + (nextId++);
   const player = { id, name:'Adventurer', color:'#7fd0ff', look:null,
                    x:0, y:0, dir:'down', zone:'town', moving:false, chat:null, chatUntil:0 };
