@@ -324,18 +324,17 @@ function refreshState(econ, p){
 function grantKill(econ, enemyType, zone){
   const et = ENEMY[enemyType] || { gold:[1,3], dropChance:0.3 };
   const out = { gold:0, items:[], boss:!!et.boss };
-  // gold
+  // gold (instant, added to econ)
   const gold = ri(et.gold[0], et.gold[1]); econ.gold = num(econ.gold)+gold; out.gold = gold;
-  // loot
+  // items are ROLLED but NOT added to inventory — the caller places them as
+  // ground drops (picked up by walking over them). Keeps the loot-on-floor feel.
   const loot = rollEnemyLoot(enemyType, zone);
-  if(loot){ econ.inventory.push(loot); out.items.push(loot); }
-  // elite / boss item extras
-  if(et.elite || et.cosmeticDrop){ const cos=randomCosmetic(); econ.inventory.push(cos); out.items.push(cos);
-    const extra=rollEnemyLoot(enemyType,zone); if(extra){ econ.inventory.push(extra); out.items.push(extra); } }
+  if(loot){ out.items.push(loot); }
+  if(et.elite || et.cosmeticDrop){ out.items.push(randomCosmetic());
+    const extra=rollEnemyLoot(enemyType,zone); if(extra) out.items.push(extra); }
   if(et.boss){
-    const g=cloneConsumable('gem'), pot=cloneConsumable('potion_major');
-    econ.inventory.push(g, pot); out.items.push(g, pot);
-    const extra=rollEnemyLoot(enemyType,zone); if(extra){ econ.inventory.push(extra); out.items.push(extra); } }
+    out.items.push(cloneConsumable('gem'), cloneConsumable('potion_major'));
+    const extra=rollEnemyLoot(enemyType,zone); if(extra) out.items.push(extra); }
   return out;
 }
 
