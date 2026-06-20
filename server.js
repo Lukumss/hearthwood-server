@@ -21,6 +21,28 @@ let rules = null;
 try { rules = require('./rules'); console.log('rules.js loaded — server-authoritative damage ACTIVE'); }
 catch (e) { console.error('rules.js not loaded — damage falls back to clamped client value:', e.message); }
 
+// Phase 2: server-authoritative ECONOMY (gold/XP/inventory/shops). Activated
+// ONLY by an explicit PHASE2=1 env var — so live can never turn it on by
+// accident. You set PHASE2=1 in the STAGING service's Environment tab.
+const PHASE2 = (process.env.PHASE2 === '1');
+let economy = null;
+if (PHASE2) {
+  try { economy = require('./economy'); console.log('economy.js loaded — PHASE2 server-authoritative economy ACTIVE'); }
+  catch (e) { console.error('PHASE2 set but economy.js failed to load — economy stays client-side:', e.message); }
+}
+// build the authoritative player-state message the client renders
+function pstateMsg(player){ const p = {}; for (const f of economy.OWNED_FIELDS) p[f] = player.econ[f]; return { t:'pstate', p }; }
+function pushState(ws, player){ if (economy && player.econ) send(ws, pstateMsg(player)); }
+// persist a PHASE2 player's authoritative econ into their account save on disk
+function saveEcon(player){
+  if (!economy || !player.econ || !player.account) return;
+  const acct = readAcct(player.account) || { name: player.name, pin: '0000' };
+  acct.save = economy.mergeIntoSave(acct.save || player.save || { v:1, p:{} }, player.econ);
+  acct.name = player.name; acct.updated = Date.now();
+  writeAcct(player.account, acct);
+  player.save = acct.save;
+}
+
 // ---- durable player saves (Render Persistent Disk) ----
 // Render mounts your disk at the path you set; default to /data, fall back to a
 // local folder for testing so the server still runs anywhere.
@@ -45,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE1-STAGINGFIX-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE2-ECON-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -288,8 +310,11 @@ function applyHitToMob(player, id, clientDmg){
   const zone = player.zone; const mobs=zoneMobs[zone]; if(!mobs) return;
   const e=mobs.find(m=>m.id===id); if(!e) return;
   let dmg, crit=false;
-  if(rules && player.save && player.save.p){
-    const r = rules.rollHitDamage(player.save.p); dmg = r.dmg; crit = r.crit;
+  // Phase 2: damage rolls from the AUTHORITATIVE econ loadout (server-owned),
+  // not the client-authored save — closes the "cloud-save a fake weapon" hole.
+  const loadout = (economy && player.econ) ? player.econ : (player.save && player.save.p);
+  if(rules && loadout){
+    const r = rules.rollHitDamage(loadout); dmg = r.dmg; crit = r.crit;
   } else {
     dmg = Math.max(1, Math.min(500, clientDmg|0));   // fail-safe clamp
   }
@@ -298,6 +323,15 @@ function applyHitToMob(player, id, clientDmg){
     const idx=mobs.indexOf(e); if(idx>=0) mobs.splice(idx,1);
     const out={ t:'mdead', zone, id:e.id, by:e.lastHitBy, boss:!!e.boss, type:e.type, xp:e.xp|0, x:Math.round(e.x), y:Math.round(e.y) };
     for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
+    // Phase 2: the SERVER grants the kill reward (gold/XP/loot) to the killer
+    // and pushes authoritative state — the client no longer rolls its own.
+    if(economy && player.econ){
+      const reward = economy.grantKill(player.econ, e.type, zone);
+      const kws = wsById(player.id);
+      if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss,
+        gold:reward.gold, xp:reward.xp, items:reward.items, mount:reward.mount, cosmetic:reward.cosmetic });
+        pushState(kws, player); }
+    }
   }
 }
 // compact mob snapshot for clients
@@ -391,16 +425,27 @@ wss.on('connection', (ws, req) => {
         player.account = key; player.name = acct.name || m.name;
         player.save = acct.save || null;   // Phase 1: keep loadout ref for server-side damage (NOT mutated)
         send(ws, { t:'login_ok', save: acct.save || null, isNew: !acct.save, name: player.name });
+        // Phase 2: seed authoritative econ from the existing save, then push it
+        if (economy) { player.econ = economy.fromSave(acct.save && acct.save.p); pushState(ws, player); }
       } else {
         player.account = key; player.name = ('' + (m.name||'Hero')).slice(0,16);
         writeAcct(key, { name: player.name, pin, save: null, created: Date.now() });
         send(ws, { t:'login_ok', save: null, isNew: true, name: player.name });
+        if (economy) { player.econ = economy.fromSave(null); pushState(ws, player); }
       }
     } else if (m.t === 'cloudsave') {
       if (player.account && m.save) {
-        player.save = m.save;   // Phase 1: refresh loadout ref (gear/skills) — stored to disk UNCHANGED below
+        player.save = m.save;   // Phase 1: refresh loadout ref (gear/skills)
         const acct = readAcct(player.account) || { name: player.name, pin: '0000' };
-        acct.save = m.save; acct.name = player.name; acct.updated = Date.now();
+        if (economy && player.econ) {
+          // Phase 2: server owns progression. Take the client's non-owned fields
+          // (position, appearance, settings) but OVERRIDE owned fields with our
+          // authoritative econ — the client cannot author gold/XP/inventory.
+          acct.save = economy.mergeIntoSave(m.save, player.econ);
+        } else {
+          acct.save = m.save;   // Phase 1 path: stored UNCHANGED
+        }
+        acct.name = player.name; acct.updated = Date.now();
         writeAcct(player.account, acct);
       }
     } else if (m.t === 'join') {
@@ -454,6 +499,33 @@ wss.on('connection', (ws, req) => {
       // a player damaged a server-owned mob → SERVER rolls the real damage
       // (m.dmg is only a clamped fallback if the server can't compute it)
       applyHitToMob(player, m.id, m.dmg|0);
+    } else if (m.t && m.t.indexOf('econ_') === 0) {
+      // Phase 2: server-authoritative economy actions. Each validates against
+      // the server's owned state, mutates it, persists, and pushes pstate back.
+      if (!economy || !player.econ) return;
+      const E = economy, ec = player.econ; let r = { ok:false, err:'unknown' };
+      if (m.t === 'econ_sell')           r = E.doSell(ec, m.id);
+      else if (m.t === 'econ_sellmany')  r = E.doSellMany(ec, m.ids);
+      else if (m.t === 'econ_upgrade')   r = E.doUpgrade(ec, m.id);
+      else if (m.t === 'econ_buy')       r = E.doBuyConsumable(ec, m.key);
+      else if (m.t === 'econ_equip')     r = E.doEquip(ec, m.id);
+      else if (m.t === 'econ_unequip')   r = E.doUnequip(ec, m.slot);
+      else if (m.t === 'econ_use')       r = E.doUse(ec, m.id);
+      else if (m.t === 'econ_drop')      r = E.doDrop(ec, m.id);
+      else if (m.t === 'econ_shop') {
+        // (re)generate this player's gear-shop stock for a vendor kind
+        player.shopStock = player.shopStock || {};
+        if (!player.shopStock[m.kind] || m.refresh) player.shopStock[m.kind] = E.genShopStock(m.kind, ec.level);
+        send(ws, { t:'shopstock', kind:m.kind, stock:player.shopStock[m.kind] });
+        return;
+      }
+      else if (m.t === 'econ_buygear') {
+        const stock = (player.shopStock && player.shopStock[m.kind]) || null;
+        r = E.doBuyGear(ec, stock, m.id);
+        if (r.ok) send(ws, { t:'shopstock', kind:m.kind, stock:player.shopStock[m.kind] });
+      }
+      send(ws, { t:'econ_ack', action:m.t, ok:!!r.ok, err:r.err, info:r });
+      if (r.ok) { pushState(ws, player); saveEcon(player); }
     } else if (m.t === 'fx') {
       // visual-only effect/projectile/slash — relay to everyone else in the zone
       const out = Object.assign({}, m);
@@ -584,6 +656,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     // final cloud save on disconnect (best effort)
+    if (economy && player.econ) { try { saveEcon(player); } catch(e){} }   // Phase 2: persist authoritative econ
     const tws = wsById(player.tradeWith); if (tws) send(tws, { t:'trade_cancel', reason:'The other player left' });
     const tp = tws && clients.get(tws); if (tp) tp.tradeWith = null;
     const z = player.zone;
