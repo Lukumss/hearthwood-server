@@ -67,7 +67,7 @@ const WORLD_SEED = 424242;                    // the whole realm grows from this
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 
 // a tiny health page so you can open the server URL in a browser and see it's alive
-const SERVER_VERSION = 'PHASE6-PARTYLOOT-2026-06-20';   // bump on every deploy to confirm Render updated
+const SERVER_VERSION = 'PHASE6-POTION-FIX-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
@@ -338,24 +338,26 @@ function applyHitToMob(player, id, clientDmg){
     // kill-counts are handled client-side (self-progression, not duplicable).
     if(economy && player.econ){
       const reward = economy.grantKill(player.econ, e.type, zone);
-      // Phase 2 party loot: if the killer is in a party, GEAR drops go to a
-      // shared Need/Greed roll instead of straight to their bag (the winner gets
-      // it server-side). Non-gear (gold/consumables/cosmetics) stays with the killer.
-      let kept = reward.items;
+      // Phase 2: items become GROUND DROPS (walk over to grab). If the killer is
+      // in a party, GEAR instead goes to a shared Need/Greed roll.
       const party = partyOf(player);
-      if(party && party.members.length >= 2 && reward.items.length){
-        kept = [];
-        for(const it of reward.items){
-          if(it && ['weapon','armor','helm','ring'].indexOf(it.kind) >= 0){
-            const idx = player.econ.inventory.findIndex(x=>x && x.id===it.id);
-            if(idx>=0) player.econ.inventory.splice(idx,1);
-            startLootRoll(player, it);
-          } else { kept.push(it); }
+      // only party members PRESENT in this zone share loot / roll — someone off
+      // in another region doesn't roll on a kill they weren't there for.
+      const present = party
+        ? party.members.filter(id => { for(const q of clients.values()) if(q.id===id) return q.zone===zone; return false; })
+        : [player.id];
+      const inParty = present.length >= 2;
+      const owners = inParty ? present.slice() : [player.id];
+      for(const it of reward.items){
+        if(inParty && it && ['weapon','armor','helm','ring'].indexOf(it.kind) >= 0){
+          startLootRoll(player, it, present);
+        } else {
+          const ang = Math.random()*Math.PI*2, r = 8 + Math.random()*14;
+          addDrop(zone, it, e.x + Math.cos(ang)*r, e.y + Math.sin(ang)*r, owners);
         }
       }
       const kws = wsById(player.id);
-      if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss,
-        gold:reward.gold, items:kept });
+      if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss, gold:reward.gold });
         pushState(kws, player); }
     }
   }
@@ -384,6 +386,24 @@ function sendFriendList(ws, player){
 // ============================================================
 const parties = {};   // pid -> { id, leader, members:[playerId] }
 const lootRolls = {}; // rollId -> { item, members:[id], choices:{}, rolls:{}, zone, t }
+// Phase 2: server-authoritative GROUND DROPS so loot is visible on the floor and
+// picked up by walking over it (the original feel) while staying dupe-proof.
+const zoneDrops = {}; // zone -> [ { id, item, x, y, t, owners:[playerId,...] } ]
+let _did = 1;
+// owners = who may see/grab this drop (the killer, or the whole party). Strangers
+// never see it — loot stays personal, exactly like the original local drops.
+function addDrop(zone, item, x, y, owners){
+  if(!item) return null;
+  if(!zoneDrops[zone]) zoneDrops[zone] = [];
+  const d = { id:'d'+(_did++), item, x:Math.round(x), y:Math.round(y), t:Date.now(), owners:owners||[] };
+  zoneDrops[zone].push(d);
+  return d;
+}
+// only the drops THIS player owns (their kills / their party's shared loot)
+function dropsSnapshot(zone, playerId){
+  return (zoneDrops[zone]||[]).filter(d => d.owners.indexOf(playerId) >= 0)
+    .map(d=>({ id:d.id, item:d.item, x:d.x, y:d.y }));
+}
 let _pid = 1, _rid = 1;
 function partyOf(p){ return p && p.party && parties[p.party] ? parties[p.party] : null; }
 function partyBroadcast(pid){
@@ -421,15 +441,15 @@ function resolveLootRoll(rollId){
   for(const mid of r.members){ const ws2 = wsById(mid); if(ws2) send(ws2, out); }
   delete lootRolls[rollId];
 }
-// Phase 2: start a party Need/Greed roll for an item the server just dropped to a
-// partied killer. Returns true if a roll started (caller already removed the item).
-function startLootRoll(killer, item){
-  const party = partyOf(killer);
-  if(!party || party.members.length < 2) return false;
+// Phase 2: start a party Need/Greed roll among the given members (already
+// filtered to those present in the kill's zone). Returns true if a roll started.
+function startLootRoll(killer, item, members){
+  members = (members && members.length ? members : (partyOf(killer)||{members:[]}).members) || [];
+  if(members.length < 2) return false;
   const rollId = 'r'+(_rid++);
-  lootRolls[rollId] = { item, members: party.members.slice(), choices:{}, done:false };
+  lootRolls[rollId] = { item, members: members.slice(), choices:{}, done:false };
   const out = { t:'loot_roll', rollId, item, from:killer.name };
-  for(const mid of party.members){ const ws2 = wsById(mid); if(ws2) send(ws2, out); }
+  for(const mid of members){ const ws2 = wsById(mid); if(ws2) send(ws2, out); }
   setTimeout(()=>resolveLootRoll(rollId), 12000);
   return true;
 }
@@ -566,6 +586,18 @@ wss.on('connection', (ws, req) => {
       else if (m.t === 'econ_cook')      r = E.doCook(ec, m.id);
       else if (m.t === 'econ_buytool')   r = E.doBuyTool(ec, m.tool);
       else if (m.t === 'econ_starterkit')r = E.doStarterKit(ec);
+      else if (m.t === 'econ_pickup') {
+        // pick up a server ground drop the player is standing on
+        const arr = zoneDrops[player.zone] || [];
+        const di = arr.findIndex(d => d.id === m.dropId);
+        if (di < 0) r = { ok:false, err:'gone' };
+        else {
+          const d = arr[di];
+          if (d.owners.indexOf(player.id) < 0) r = { ok:false, err:'not yours' };
+          else if (Math.hypot((player.x||0)-d.x, (player.y||0)-d.y) > 48) r = { ok:false, err:'too far' };
+          else { arr.splice(di,1); const it = Object.assign({}, d.item); it.id = E.uid(); ec.inventory.push(it); r = { ok:true, item:it, dropId:d.id }; }
+        }
+      }
       else if (m.t === 'econ_shop') {
         // (re)generate this player's gear-shop stock for a vendor kind
         player.shopStock = player.shopStock || {};
@@ -784,6 +816,13 @@ setInterval(() => {
     }
     send(ws, { t:'players', zone:p.zone, here: peers.length, online: clients.size, list });
     if (zoneMaps[p.zone]) send(ws, { t:'mobs', zone:p.zone, list: mobSnapshot(p.zone) });
+    send(ws, { t:'drops', zone:p.zone, list: dropsSnapshot(p.zone, p.id) });
+  }
+  // expire old ground drops (2 min) so the floor doesn't fill forever
+  for (const zone in zoneDrops) {
+    const arr = zoneDrops[zone];
+    for (let i=arr.length-1;i>=0;i--) if (now - arr[i].t > 120000) arr.splice(i,1);
+    if (!arr.length) delete zoneDrops[zone];
   }
 
   // free mobs/maps for zones nobody is in (so they re-seed fresh next time)
