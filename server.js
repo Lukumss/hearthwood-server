@@ -585,6 +585,7 @@ wss.on('connection', (ws, req) => {
       else if (m.t === 'econ_depositall')r = E.doDepositAll(ec);
       else if (m.t === 'econ_barrel')    r = E.grantBarrel(ec, m.bkey);
       else if (m.t === 'econ_give')      r = E.giveSafe(ec, m.spec);
+      else if (m.t === 'econ_givequestitem') r = E.giveQuestItem(ec, m.key);
       else if (m.t === 'econ_cook')      r = E.doCook(ec, m.id);
       else if (m.t === 'econ_buytool')   r = E.doBuyTool(ec, m.tool);
       else if (m.t === 'econ_starterkit')r = E.doStarterKit(ec);
