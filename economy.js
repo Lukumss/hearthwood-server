@@ -159,7 +159,7 @@ function giveSafe(econ, spec){
 // giveSafe forbids gear on purpose; this is the ONLY sanctioned gear grant, gated give-once
 // per character so it can't be farmed. Used by the intro quest "The Understudy".
 const QUEST_ITEMS = {
-  hero_blade: ()=>{ const it=makeGear('sword','rare',0); it.name='The Hero\u2019s Blade'; it.questId='hero_blade';
+  hero_blade: ()=>{ const it=makeGear('sword','common',0); it.name='The Hero\u2019s Blade'; it.questId='hero_blade';
     it.desc='Left to an understudy by a hero the songs forgot.'; return it; },
 };
 function _ownsQuestItem(econ, qid){
@@ -384,9 +384,16 @@ function doSellMany(econ, ids){
   econ.gold=num(econ.gold)+total;
   return { ok:true, gold:total, count:n };
 }
+// find an item by id in the bag OR in any equipped slot (so the forge/enchanter
+// can act on equipped gear too, not just the bag)
+function _findItemAnywhere(econ, id){
+  const i=_findInv(econ,id); if(i>=0) return econ.inventory[i];
+  if(econ.equip){ for(const s in econ.equip){ if(econ.equip[s] && econ.equip[s].id===id) return econ.equip[s]; } }
+  return null;
+}
 function doUpgrade(econ, id){
-  const i=_findInv(econ,id); if(i<0) return { ok:false, err:'no item' };
-  const item=econ.inventory[i]; if(item.kind!=='weapon') return { ok:false, err:'not a weapon' };
+  const item=_findItemAnywhere(econ,id); if(!item) return { ok:false, err:'no item' };
+  if(item.kind!=='weapon') return { ok:false, err:'not a weapon' };
   const c=upgradeCost(item);
   if(num(econ.gold)<c.gold) return { ok:false, err:'not enough gold' };
   if(_countMat(econ,'Iron Ore')<c.ore) return { ok:false, err:'need ore' };
@@ -394,6 +401,18 @@ function doUpgrade(econ, id){
   econ.gold-=c.gold; _spendMat(econ,'Iron Ore',c.ore); if(c.gem) _spendMat(econ,'Star Gem',c.gem);
   item.plus=num(item.plus)+1; item.name=item.name.replace(/ \+\d+$/,'')+' +'+item.plus;
   return { ok:true, plus:item.plus, name:item.name };
+}
+// Sela the Enchanter: gamble 100g for a 10% chance at +1 glow (bag OR equipped).
+// Server-authoritative so the enchant persists and the gold is actually spent.
+function doEnchant(econ, id){
+  const item=_findItemAnywhere(econ,id); if(!item) return { ok:false, err:'no item' };
+  if(!(item.kind==='weapon'||item.kind==='armor'||item.kind==='helm'||item.kind==='ring')) return { ok:false, err:'not enchantable' };
+  if(num(item.plus)>=10) return { ok:false, err:'maxed' };
+  if(num(econ.gold)<100) return { ok:false, err:'not enough gold' };
+  econ.gold-=100;
+  const success = Math.random()<0.10;
+  if(success) item.plus=num(item.plus)+1;
+  return { ok:true, success, plus:num(item.plus), name:item.name };
 }
 function doBuyConsumable(econ, key){
   const proto=CONSUMABLES[key]; if(!proto) return { ok:false, err:'no such item' };
@@ -515,7 +534,7 @@ module.exports = {
   addSkillXp, awardCombatXp, gainXp, skillNeed, ri, uid,
   ENEMY, ZONE_LOOT, CONSUMABLES,
   // authoritative economy actions (each returns {ok, err?, ...info}; mutates econ)
-  doSell, doSellMany, doUpgrade, doBuyConsumable, doEquip, doUnequip, doUse, doDrop,
+  doSell, doSellMany, doUpgrade, doEnchant, doBuyConsumable, doEquip, doUnequip, doUse, doDrop,
   doDeposit, doWithdraw, doDepositAll,
   resolveOfferItems, executeTrade, grantBarrel,
   giveSafe, doCook, doBuyTool, doStarterKit,
