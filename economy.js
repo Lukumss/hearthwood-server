@@ -155,6 +155,27 @@ function giveSafe(econ, spec){
   econ.inventory.push(item);
   return { ok:true, item };
 }
+// ---------- one-time QUEST reward items (server-minted so they persist + can be wielded) ----------
+// giveSafe forbids gear on purpose; this is the ONLY sanctioned gear grant, gated give-once
+// per character so it can't be farmed. Used by the intro quest "The Understudy".
+const QUEST_ITEMS = {
+  hero_blade: ()=>{ const it=makeGear('sword','rare',0); it.name='The Hero\u2019s Blade'; it.questId='hero_blade';
+    it.desc='Left to an understudy by a hero the songs forgot.'; return it; },
+};
+function _ownsQuestItem(econ, qid){
+  const has=(arr)=>Array.isArray(arr)&&arr.some(it=>it&&it.questId===qid);
+  if(has(econ.inventory)||has(econ.bank)) return true;
+  const eq=econ.equip||{}; for(const s in eq){ if(eq[s]&&eq[s].questId===qid) return true; }
+  return false;
+}
+function giveQuestItem(econ, key){
+  const make = QUEST_ITEMS[String(key||'')];
+  if(!make) return { ok:false, err:'unknown quest item' };
+  if(_ownsQuestItem(econ, key)) return { ok:true, already:true };   // idempotent: already granted
+  const item = make();
+  econ.inventory.push(item);
+  return { ok:true, item };
+}
 // cook a raw fish the player actually owns: consume it, produce cooked or burnt.
 function doCook(econ, rawId){
   const i = econ.inventory.findIndex(it=>it && it.id===rawId && it.kind==='fishraw');
@@ -498,5 +519,6 @@ module.exports = {
   doDeposit, doWithdraw, doDepositAll,
   resolveOfferItems, executeTrade, grantBarrel,
   giveSafe, doCook, doBuyTool, doStarterKit,
+  giveQuestItem,
   genShopStock, doBuyGear,
 };
