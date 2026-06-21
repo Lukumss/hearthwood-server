@@ -241,10 +241,14 @@ function simZone(zone, dt){
       else { e.wanderT-=dt; if(e.wanderT<=0){ e.wanderT=srnd(1,2.5); e.vx=srnd(-1,1); e.vy=srnd(-1,1); } stepMobToward(map,e,e.x+e.vx*40,e.y+e.vy*40,e.speed*0.4,dt,4,3); }
       continue;
     }
+    const peaceful = (zone==='forest' && !e.boss);   // gentle starting area
     if(!e.boss && distHome>leash){ e.state='return'; }
-    if(e.state==='return'){ if(distHome<30){ e.state='idle'; } else { stepMobToward(map,e,e.homeX,e.homeY,e.speed,dt,5,4); continue; } }
-    if(tgt && (d<e.aggro || e.boss)) e.state='chase';
-    else if(d>e.aggro*1.6) e.state='idle';
+    if(e.state==='return'){ if(distHome<30){ e.state='idle'; if(peaceful) e.lastHitBy=null; } else { stepMobToward(map,e,e.homeX,e.homeY,e.speed,dt,5,4); continue; } }
+    // Forest roamers DON'T aggro on sight (so a new player isn't mobbed) but FIGHT BACK once attacked;
+    // they calm down again after leashing home (lastHitBy cleared above). The zone boss always fights.
+    const provoked = peaceful && !!e.lastHitBy;
+    if((!peaceful || provoked) && tgt && (d<e.aggro || e.boss)) e.state='chase';
+    else if((peaceful && !provoked) || d>e.aggro*1.6) e.state='idle';
     if(e.state==='chase' && tgt){
       if(d>e.range*0.85){ stepMobToward(map,e,tgt.x,tgt.y,e.speed,dt,4,3); e.dir = Math.abs(tgt.x-e.x)>Math.abs(tgt.y-e.y)?(tgt.x<e.x?'left':'right'):(tgt.y<e.y?'up':'down'); }
       else if(e.atkCd<=0){ e.atkCd=1/e.atkspd; e.swing=0.2;
