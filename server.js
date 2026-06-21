@@ -575,6 +575,7 @@ wss.on('connection', (ws, req) => {
       if (m.t === 'econ_sell')           r = E.doSell(ec, m.id);
       else if (m.t === 'econ_sellmany')  r = E.doSellMany(ec, m.ids);
       else if (m.t === 'econ_upgrade')   r = E.doUpgrade(ec, m.id);
+      else if (m.t === 'econ_enchant')   r = E.doEnchant(ec, m.id);
       else if (m.t === 'econ_buy')       r = E.doBuyConsumable(ec, m.key);
       else if (m.t === 'econ_equip')     r = E.doEquip(ec, m.id);
       else if (m.t === 'econ_unequip')   r = E.doUnequip(ec, m.slot);
