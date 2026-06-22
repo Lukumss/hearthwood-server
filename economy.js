@@ -353,6 +353,7 @@ function grantKill(econ, enemyType, zone){
   if(loot){ out.items.push(loot); }
   if(et.elite || et.cosmeticDrop){ out.items.push(randomCosmetic());
     const extra=rollEnemyLoot(enemyType,zone); if(extra) out.items.push(extra); }
+  else if(Math.random()<0.012){ out.items.push(randomCosmetic()); }   // any enemy: rare ~1.2% cosmetic
   if(et.boss){
     out.items.push(cloneConsumable('gem'), cloneConsumable('potion_major'));
     const extra=rollEnemyLoot(enemyType,zone); if(extra) out.items.push(extra); }
@@ -511,11 +512,13 @@ function executeTrade(econA, offerA, econB, offerB){
   return { ok:true, aGave:a.items.length, bGave:b.items.length, aGold:a.gold, bGold:b.gold };
 }
 // server-owned gear-shop stock (port of genShopStock) so buys are validated
-const SHOP_BASES = { sword:['dagger','sword','axe'], mage:['staff','staff','ring'], armor:['armor_leather','armor_plate','helm','ring'] };
+const SHOP_BASES = { sword:['dagger','sword','axe'], mage:['staff','staff','ring'], armor:['armor_leather','armor_plate','helm','helm_leathercowl','ring'] };
 function genShopStock(kind, level){
   const bases=SHOP_BASES[kind]||['sword']; const lvl=Math.max(1,num(level)||1); const tier=Math.floor((lvl-1)/3);
   const stock=[];
-  for(let i=0;i<6;i++){ const base=bases[Math.floor(Math.random()*bases.length)]; const it=makeGear(base, pickRarity(0.4+lvl*0.05,0), tier); it.price=Math.round(it.value*2.4); stock.push(it); }
+  if(kind==='armor'){ const cowl=makeGear('helm_leathercowl','common',0); cowl.price=Math.round(cowl.value*2.4); stock.push(cowl); }
+  const n=(kind==='armor')?5:6;
+  for(let i=0;i<n;i++){ const base=bases[Math.floor(Math.random()*bases.length)]; const it=makeGear(base, pickRarity(0.4+lvl*0.05,0), tier); it.price=Math.round(it.value*2.4); stock.push(it); }
   stock.sort((a,b)=>a.price-b.price); return stock;
 }
 function doBuyGear(econ, stock, id){
