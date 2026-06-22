@@ -36,6 +36,7 @@ const ITEM_BASES = {
   armor_leather:{ kind:'armor', icon:'armor_leather', name:'Leather Vest', power:3 },
   armor_plate:  { kind:'armor', icon:'armor_plate',   name:'Plate Mail',   power:6 },
   helm:   { kind:'helm', icon:'helm', name:'Helm', power:2 },
+  helm_leathercowl: { kind:'helm', icon:'helm', name:'Leather Cowl', power:2, art:'cowl' },
   ring:   { kind:'ring', icon:'ring', name:'Ring', power:4 },
 };
 const COSMETICS = {
@@ -109,6 +110,7 @@ function makeGear(baseKey, rarity, tier){
   if(base.kind==='weapon'){ item.damage=power; item.range=base.range; item.speed=base.speed*(0.95+Math.random()*0.15); item.atype=base.atype; }
   else if(base.kind==='armor'||base.kind==='helm') item.defense=power;
   else if(base.kind==='ring') item.bonusDmg=power;
+  if(base.art) item.art=base.art;
   return item;
 }
 function cloneConsumable(key){ const c=CONSUMABLES[key]; return c ? Object.assign({ id:uid() }, c) : null; }
