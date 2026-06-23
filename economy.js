@@ -37,6 +37,8 @@ const ITEM_BASES = {
   armor_plate:  { kind:'armor', icon:'armor_plate',   name:'Plate Mail',   power:6 },
   helm:   { kind:'helm', icon:'helm', name:'Helm', power:2 },
   helm_leathercowl: { kind:'helm', icon:'helm', name:'Leather Cowl', power:2, art:'cowl' },
+  helm_iron:        { kind:'helm', icon:'ic_ironhelm', name:'Iron Great Helm', power:4, art:'iron' },
+  helm_executioner: { kind:'helm', icon:'ic_exehelm', name:'Executioner Helm', power:5, art:'executioner' },
   ring:   { kind:'ring', icon:'ring', name:'Ring', power:4 },
 };
 const COSMETICS = {
@@ -76,14 +78,14 @@ const ENEMY = {
 };
 // per-zone loot config — ported from ZONES (dropTier + lootBases)
 const ZONE_LOOT = {
-  forest:{tier:0,bases:['dagger','sword','bow','armor_leather','helm','ring']},
-  snow:{tier:1,bases:['sword','axe','bow','staff','armor_plate','helm','ring']},
-  desert:{tier:2,bases:['sword','axe','bow','staff','armor_plate','helm','ring']},
-  desert_tomb:{tier:2,bases:['sword','axe','staff','armor_plate','helm','ring']},
-  volcano:{tier:3,bases:['sword','axe','bow','staff','armor_plate','helm','ring']},
-  volcano_forge:{tier:3,bases:['sword','axe','staff','armor_plate','helm','ring']},
-  crypt:{tier:1,bases:['sword','axe','staff','armor_plate','helm','ring']},
-  shadewell:{tier:2,bases:['sword','axe','bow','staff','armor_plate','helm','ring']},
+  forest:{tier:0,bases:['dagger','sword','bow','armor_leather','helm','helm_iron','ring']},
+  snow:{tier:1,bases:['sword','axe','bow','staff','armor_plate','helm','helm_iron','helm_executioner','ring']},
+  desert:{tier:2,bases:['sword','axe','bow','staff','armor_plate','helm','helm_iron','helm_executioner','ring']},
+  desert_tomb:{tier:2,bases:['sword','axe','staff','armor_plate','helm','helm_executioner','ring']},
+  volcano:{tier:3,bases:['sword','axe','bow','staff','armor_plate','helm','helm_executioner','ring']},
+  volcano_forge:{tier:3,bases:['sword','axe','staff','armor_plate','helm','helm_executioner','ring']},
+  crypt:{tier:1,bases:['sword','axe','staff','armor_plate','helm','helm_iron','ring']},
+  shadewell:{tier:2,bases:['sword','axe','bow','staff','armor_plate','helm','helm_iron','helm_executioner','ring']},
 };
 
 // ---------- server-side unique ids (won't collide with client temp ids) ----------
