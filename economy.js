@@ -163,6 +163,14 @@ function giveSafe(econ, spec){
 const QUEST_ITEMS = {
   hero_blade: ()=>{ const it=makeGear('sword','common',0); it.name='The Hero\u2019s Blade'; it.questId='hero_blade';
     it.desc='Left to an understudy by a hero the songs forgot.'; return it; },
+  // Pip the Welcomer's one-time starter bundle (each gated give-once via questId)
+  welcome_party:   ()=>({ id:'wc_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6), kind:'cosmetic', slot:'cosmetic', name:'Party Hat', icon:'cos_party', hatType:'party', rarity:'legendary', cosmetic:true, value:500, questId:'welcome_party' }),
+  welcome_cowl:    ()=>{ const it=makeGear('helm_leathercowl','common',0); it.questId='welcome_cowl'; return it; },
+  welcome_leather: ()=>{ const it=makeGear('armor_leather','common',0); it.questId='welcome_leather'; return it; },
+  welcome_plate:   ()=>{ const it=makeGear('armor_plate','common',0); it.questId='welcome_plate'; return it; },
+  welcome_staff:   ()=>{ const it=makeGear('staff','common',0); it.questId='welcome_staff'; return it; },
+  welcome_sword:   ()=>{ const it=makeGear('sword','common',0); it.questId='welcome_sword'; return it; },
+  welcome_bow:     ()=>{ const it=makeGear('bow','common',0); it.questId='welcome_bow'; return it; },
 };
 function _ownsQuestItem(econ, qid){
   const has=(arr)=>Array.isArray(arr)&&arr.some(it=>it&&it.questId===qid);
