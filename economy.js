@@ -35,6 +35,7 @@ const ITEM_BASES = {
   staff:  { kind:'weapon', icon:'staff',  name:'Staff',      power:9,  range:130,speed:0.95,atype:'magic'  },
   armor_leather:{ kind:'armor', icon:'armor_leather', name:'Leather Vest', power:3 },
   armor_plate:  { kind:'armor', icon:'armor_plate',   name:'Plate Mail',   power:6 },
+  armor_steelplate:{ kind:'armor', icon:'armor_steelplate', name:'Steel Plate', power:7 },
   helm:   { kind:'helm', icon:'helm', name:'Helm', power:2 },
   helm_leathercowl: { kind:'helm', icon:'helm', name:'Leather Cowl', power:2, art:'cowl' },
   helm_iron:        { kind:'helm', icon:'ic_ironhelm', name:'Iron Great Helm', power:4, art:'iron' },
@@ -56,6 +57,9 @@ const CONSUMABLES = {
   potion_major:{ kind:'potion', icon:'potion_red', name:'Greater Health Potion', heal:80, value:30, rarity:'uncommon', desc:'Restores 80 HP.' },
   ore:{ kind:'material', icon:'ore', name:'Iron Ore', value:8, rarity:'common', desc:'Used at the forge to upgrade weapons.' },
   gem:{ kind:'material', icon:'gem', name:'Star Gem', value:40, rarity:'rare', desc:'A precious gem. Powers legendary upgrades.' },
+  worldstone:{ kind:'material', icon:'gem', name:'Worldstone', value:200, rarity:'epic', desc:'Catalyst to Ascend gear past +12. Drops from world bosses.' },
+  dungeon_sigil:{ kind:'material', icon:'gem', name:'Dungeon Sigil', value:400, rarity:'epic', desc:'Catalyst to Mythforge gear past +15. Drops from dungeon bosses.' },
+  raid_ember:{ kind:'material', icon:'gem', name:'Raid Ember', value:900, rarity:'legendary', desc:'The rarest catalyst — pushes gear to +20. Drops from raid bosses.' },
 };
 // per-enemy reward data (gold range / xp / drop flags) — ported from ENEMY_TYPES
 const ENEMY = {
@@ -220,7 +224,8 @@ function rollEnemyLoot(enemyType, zone){
   const et=ENEMY[enemyType]; if(!et) return null;
   if(Math.random() > et.dropChance && !et.boss) return null;
   const z=ZONE_LOOT[zone] || ZONE_LOOT.forest;
-  const baseKey=z.bases[Math.floor(Math.random()*z.bases.length)];
+  const dbases=(z.bases||[]).concat('armor_steelplate');
+  const baseKey=dbases[Math.floor(Math.random()*dbases.length)];
   return makeGear(baseKey, pickRarity(et.boss?2.2:1, et.boss?2:0), z.tier||0);
 }
 // effective sell value (port of client sellValue): gear/cosmetic priced by
@@ -236,6 +241,19 @@ function sellValue(item){
 function upgradeCost(item){
   const lvl=num(item.plus);
   return { gold: Math.round(40*Math.pow(1.6,lvl)+num(item.power)*4), ore: 1+lvl, gem: lvl>=4?1:0 };
+}
+// ---- +20 enhancement ladder: banded, SAFE (failure never destroys/downgrades) ----
+function enhancePlan(item){
+  const lvl=num(item.plus); if(lvl>=20) return null;
+  const power=num(item.power);
+  const gold=Math.round(50*Math.pow(1.5,lvl)+power*5);
+  let band,odds,mats;
+  if(lvl<9){ band='Refining';     odds=Math.max(0.70,1-lvl*0.035); mats=[{name:'Iron Ore',qty:1+Math.floor(lvl/2)}]; }
+  else if(lvl<12){ band='Tempering';   odds=[0.65,0.55,0.45][lvl-9];  mats=[{name:'Iron Ore',qty:6},{name:'Star Gem',qty:2+(lvl-9)}]; }
+  else if(lvl<15){ band='Ascending';   odds=[0.40,0.34,0.28][lvl-12]; mats=[{name:'Star Gem',qty:3},{name:'Worldstone',qty:1}]; }
+  else if(lvl<18){ band='Mythforging'; odds=[0.24,0.20,0.16][lvl-15]; mats=[{name:'Star Gem',qty:5},{name:'Dungeon Sigil',qty:1}]; }
+  else { band='Apex'; odds=[0.13,0.10][lvl-18]; mats=[{name:'Raid Ember',qty:1}]; }
+  return { band, gold, odds, mats };
 }
 
 // ---------- skill / level curves (ports of skilling.js + game.js) ----------
@@ -367,7 +385,9 @@ function grantKill(econ, enemyType, zone){
     const extra=rollEnemyLoot(enemyType,zone); if(extra) out.items.push(extra); }
   else if(Math.random()<0.012){ out.items.push(randomCosmetic()); }   // any enemy: rare ~1.2% cosmetic
   if(et.boss){
-    out.items.push(cloneConsumable('gem'), cloneConsumable('potion_major'));
+    out.items.push(cloneConsumable('gem'), cloneConsumable('potion_major'), cloneConsumable('worldstone'));
+    if(Math.random()<0.5) out.items.push(cloneConsumable('dungeon_sigil'));
+    if(Math.random()<0.2) out.items.push(cloneConsumable('raid_ember'));
     const extra=rollEnemyLoot(enemyType,zone); if(extra) out.items.push(extra); }
   return out;
 }
@@ -406,14 +426,14 @@ function _findItemAnywhere(econ, id){
 }
 function doUpgrade(econ, id){
   const item=_findItemAnywhere(econ,id); if(!item) return { ok:false, err:'no item' };
-  if(item.kind!=='weapon') return { ok:false, err:'not a weapon' };
-  const c=upgradeCost(item);
-  if(num(econ.gold)<c.gold) return { ok:false, err:'not enough gold' };
-  if(_countMat(econ,'Iron Ore')<c.ore) return { ok:false, err:'need ore' };
-  if(c.gem && _countMat(econ,'Star Gem')<c.gem) return { ok:false, err:'need gem' };
-  econ.gold-=c.gold; _spendMat(econ,'Iron Ore',c.ore); if(c.gem) _spendMat(econ,'Star Gem',c.gem);
-  item.plus=num(item.plus)+1; item.name=item.name.replace(/ \+\d+$/,'')+' +'+item.plus;
-  return { ok:true, plus:item.plus, name:item.name };
+  if(!(item.kind==='weapon'||item.kind==='armor'||item.kind==='helm'||item.kind==='ring')) return { ok:false, err:'not upgradeable' };
+  const plan=enhancePlan(item); if(!plan) return { ok:false, err:'maxed' };
+  if(num(econ.gold)<plan.gold) return { ok:false, err:'not enough gold' };
+  for(const m of plan.mats){ if(_countMat(econ,m.name)<m.qty) return { ok:false, err:'need '+m.name }; }
+  econ.gold-=plan.gold; for(const m of plan.mats) _spendMat(econ,m.name,m.qty);
+  const success = Math.random() < plan.odds;          // SAFE: failure only consumes mats/gold
+  if(success){ item.plus=num(item.plus)+1; item.name=item.name.replace(/ \+\d+$/,'')+' +'+item.plus; }
+  return { ok:true, success, plus:num(item.plus), name:item.name, band:plan.band };
 }
 // Sela the Enchanter: gamble 100g for a 10% chance at +1 glow (bag OR equipped).
 // Server-authoritative so the enchant persists and the gold is actually spent.
@@ -524,7 +544,7 @@ function executeTrade(econA, offerA, econB, offerB){
   return { ok:true, aGave:a.items.length, bGave:b.items.length, aGold:a.gold, bGold:b.gold };
 }
 // server-owned gear-shop stock (port of genShopStock) so buys are validated
-const SHOP_BASES = { sword:['dagger','sword','axe'], mage:['staff','staff','ring'], armor:['armor_leather','armor_plate','helm','helm_leathercowl','ring'] };
+const SHOP_BASES = { sword:['dagger','sword','axe'], mage:['staff','staff','ring'], armor:['armor_leather','armor_plate','armor_steelplate','helm','helm_leathercowl','ring'] };
 function genShopStock(kind, level){
   const bases=SHOP_BASES[kind]||['sword']; const lvl=Math.max(1,num(level)||1); const tier=Math.floor((lvl-1)/3);
   const stock=[];
@@ -544,7 +564,7 @@ function doBuyGear(econ, stock, id){
 
 module.exports = {
   OWNED_FIELDS, STATE_FIELDS, fromSave, mergeIntoSave, refreshState, grantKill,
-  rollEnemyLoot, makeGear, cloneConsumable, randomCosmetic, sellValue, upgradeCost,
+  rollEnemyLoot, makeGear, cloneConsumable, randomCosmetic, sellValue, upgradeCost, enhancePlan,
   effectiveDamage, rollHitDamage, weaponDamage, skillLvl,
   addSkillXp, awardCombatXp, gainXp, skillNeed, ri, uid,
   ENEMY, ZONE_LOOT, CONSUMABLES,
