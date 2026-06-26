@@ -99,11 +99,14 @@ const num = (v)=>{ v=Number(v); return isFinite(v)?v:0; };
 const ri  = (a,b)=> a + Math.floor(Math.random()*(b-a+1));
 
 // ---------- item generation (ports of data.js) ----------
-function pickRarity(luck, floor){
-  const weights = RARITY_ORDER.map((r,i)=>{ let w=RARITY[r].weight; if(luck) w*=(1+i*0.18*luck); if(floor && i<floor) w*=0.15; return w; });
+function pickRarity(luck, floor, hard){
+  const weights = RARITY_ORDER.map((r,i)=>{ let w=RARITY[r].weight;
+    if(luck) w*=(1+i*0.18*luck);
+    if(floor && i<floor) w = hard ? 0 : w*0.15;
+    return w; });
   let total=weights.reduce((a,b)=>a+b,0), roll=Math.random()*total;
   for(let i=0;i<RARITY_ORDER.length;i++){ roll-=weights[i]; if(roll<=0) return RARITY_ORDER[i]; }
-  return 'common';
+  return hard ? RARITY_ORDER[floor||0] : 'common';
 }
 function makeGear(baseKey, rarity, tier){
   const base=ITEM_BASES[baseKey], rar=RARITY[rarity];
@@ -226,7 +229,14 @@ function rollEnemyLoot(enemyType, zone){
   const z=ZONE_LOOT[zone] || ZONE_LOOT.forest;
   const dbases=(z.bases||[]).concat('armor_steelplate');
   const baseKey=dbases[Math.floor(Math.random()*dbases.length)];
-  return makeGear(baseKey, pickRarity(et.boss?2.2:1, et.boss?2:0), z.tier||0);
+  const zt=z.tier||0;
+  // rarity scales with the kill: zone tier lifts the baseline; elites/bosses guarantee a hard floor
+  const luck=(et.boss?2.4:et.elite?1.6:1)+zt*0.12;
+  let floor=0, hard=false;
+  if(et.boss){ floor=2; hard=true; }            // bosses: RARE+ with a real epic/legendary shot
+  else if(et.elite){ floor=1; hard=true; }       // elites: UNCOMMON+
+  else { floor=Math.min(2, zt); }                // normal mobs: soft floor by zone tier
+  return makeGear(baseKey, pickRarity(luck, floor, hard), zt);
 }
 // effective sell value (port of client sellValue): gear/cosmetic priced by
 // rarity + enchant level; materials/consumables keep their listed value.
@@ -248,7 +258,7 @@ function enhancePlan(item){
   const power=num(item.power);
   const gold=Math.round(50*Math.pow(1.5,lvl)+power*5);
   let band,odds,mats;
-  if(lvl<9){ band='Refining';     odds=Math.max(0.70,1-lvl*0.035); mats=[{name:'Iron Ore',qty:1+Math.floor(lvl/2)}]; }
+  if(lvl<9){ band='Refining';     odds=Math.max(0.70,1-lvl*0.035); mats=(lvl<5)?[{name:'Tin Ore',qty:1+lvl}]:[{name:'Iron Ore',qty:lvl-2}]; }
   else if(lvl<12){ band='Tempering';   odds=[0.65,0.55,0.45][lvl-9];  mats=[{name:'Iron Ore',qty:6},{name:'Star Gem',qty:2+(lvl-9)}]; }
   else if(lvl<15){ band='Ascending';   odds=[0.40,0.34,0.28][lvl-12]; mats=[{name:'Star Gem',qty:3},{name:'Worldstone',qty:1}]; }
   else if(lvl<18){ band='Mythforging'; odds=[0.24,0.20,0.16][lvl-15]; mats=[{name:'Star Gem',qty:5},{name:'Dungeon Sigil',qty:1}]; }

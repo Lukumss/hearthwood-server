@@ -362,8 +362,16 @@ function applyHitToMob(player, id, clientDmg){
         const ang = Math.random()*Math.PI*2, r = 8 + Math.random()*14;
         addDrop(zone, it, e.x + Math.cos(ang)*r, e.y + Math.sin(ang)*r, owners);
       }
+      // notable-drop FLEX: announce epic/legendary GEAR to EVERYONE on the server
+      // (zone-wide would miss instanced dungeons — a legendary should be server-wide)
+      const _RANK={common:0,uncommon:1,rare:2,epic:3,legendary:4};
+      let top=null; for(const it of reward.items){ if(it && ['weapon','armor','helm','ring','cosmetic'].includes(it.kind) && (!top || _RANK[it.rarity]>_RANK[top.rarity])) top=it; }
+      if(top && _RANK[top.rarity]>=3){
+        const flex={ t:'lootflex', name:player.name, item:top.name, rarity:top.rarity, cosmetic:top.kind==='cosmetic' };
+        for(const ws2 of clients.keys()) send(ws2, flex);
+      }
       const kws = wsById(player.id);
-      if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss, gold:reward.gold });
+      if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss, gold:reward.gold, topRarity:(top?top.rarity:null) });
         pushState(kws, player); }
     }
   }
