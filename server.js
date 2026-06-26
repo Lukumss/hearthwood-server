@@ -30,8 +30,10 @@ if (PHASE2) {
   try { economy = require('./economy'); console.log('economy.js loaded — PHASE2 server-authoritative economy ACTIVE'); }
   catch (e) { console.error('PHASE2 set but economy.js failed to load — economy stays client-side:', e.message); }
 }
-// build the authoritative player-state message the client renders
-function pstateMsg(player){ const p = {}; for (const f of economy.OWNED_FIELDS) p[f] = player.econ[f]; return { t:'pstate', p }; }
+// build the authoritative player-state message the client renders. The server now
+// owns ALL progression, so it pushes the COMPLETE state (every STATE_FIELD) — the
+// client treats this as truth and never mutates these fields itself.
+function pstateMsg(player){ const p = {}; for (const f of economy.STATE_FIELDS) p[f] = player.econ[f]; return { t:'pstate', p }; }
 function pushState(ws, player){ if (economy && player.econ) send(ws, pstateMsg(player)); }
 // persist a PHASE2 player's authoritative econ into their account save on disk
 function saveEcon(player){
@@ -212,14 +214,35 @@ function stepMobToward(map, o, tx, ty, speed, dt, hw, hh){
 function zonePlayers(zone){ const a=[]; for(const p of clients.values()) if(p.zone===zone && !p.dead) a.push(p); return a; }
 function nearestPlayer(zone, x, y){ let best=null,bd=1e9; for(const p of zonePlayers(zone)){ const d=sdist(x,y,p.x,p.y); if(d<bd){bd=d;best=p;} } return best?{p:best,d:bd}:null; }
 // apply mob damage to a backgrounded player's server-side HP mirror; kill + announce if it drops
-function damageAwayPlayer(zone, p, dmg){
-  const real = Math.max(1, Math.round(dmg - (p.def||0)*0.6));
-  p.hp = (p.hp==null? (p.maxHp||100) : p.hp) - real;
-  if(p.hp <= 0 && !p.dead){
-    p.dead = true; p.deadAt = Date.now();
+function serverPlayerDef(p){
+  if(p && p.econ && p.econ.equip){ let d=0; const eq=p.econ.equip;
+    if(eq.armor) d+=Number(eq.armor.defense)||0; if(eq.helm) d+=Number(eq.helm.defense)||0;
+    return d; }
+  return Number(p&&p.def)||0;
+}
+// AUTHORITATIVE damage to a player's server HP (active OR backgrounded). This is what
+// closes godmode: the server owns HP, applies the hit, pushes the result, and the
+// client renders it instead of deciding its own health.
+function serverHurtPlayer(zone, p, dmg, kind){
+  if(!p || p.dead) return;
+  const real = Math.max(1, Math.round(Number(dmg||0) - serverPlayerDef(p)*0.6));
+  const maxHp = (p.econ ? Number(p.econ.maxHp)||100 : Number(p.maxHp)||100);
+  let hp = (p.econ ? (p.econ.hp==null?maxHp:Number(p.econ.hp)) : (p.hp==null?maxHp:Number(p.hp)));
+  hp = Math.max(0, hp - real);
+  if(p.econ) p.econ.hp = hp;
+  p.hp = hp;
+  const ws = wsById(p.id);
+  if(ws){ send(ws, { t:'ehit', dmg:Math.round(Number(dmg||0)), kind:kind||'melee' });
+          send(ws, { t:'hp', hp:Math.round(hp), maxHp:Math.round(maxHp) }); }
+  if(hp<=0 && !p.dead){
+    p.dead=true; p.deadAt=Date.now();
+    if(p.econ){ p.econ.gold = Math.floor(Number(p.econ.gold||0)*0.85); }   // server applies the death gold penalty (was client-side)
     for(const [ws2,q] of clients) if(q.zone===zone) send(ws2, { t:'pdead', id:p.id, name:p.name });
+    if(ws){ send(ws, { t:'youdied' }); pushState(ws, p); saveEcon(p); }
   }
 }
+// kept as an alias for existing callers (backgrounded-player damage)
+function damageAwayPlayer(zone, p, dmg){ serverHurtPlayer(zone, p, dmg, 'melee'); }
 
 // one simulation step for a zone (called from the tick)
 function simZone(zone, dt){
@@ -252,10 +275,7 @@ function simZone(zone, dt){
     if(e.state==='chase' && tgt){
       if(d>e.range*0.85){ stepMobToward(map,e,tgt.x,tgt.y,e.speed,dt,4,3); e.dir = Math.abs(tgt.x-e.x)>Math.abs(tgt.y-e.y)?(tgt.x<e.x?'left':'right'):(tgt.y<e.y?'up':'down'); }
       else if(e.atkCd<=0){ e.atkCd=1/e.atkspd; e.swing=0.2;
-        // active players apply damage on their own client; AWAY players take it server-side so they can die
-        const tws=wsById(tgt.id);
-        if(tgt.inactive){ damageAwayPlayer(zone, tgt, e.dmg); }
-        else if(tws) send(tws, { t:'ehit', dmg:e.dmg, kind:e.atype });
+        serverHurtPlayer(zone, tgt, e.dmg, e.atype);   // SERVER owns HP for everyone now (active + away)
       }
     } else {
       e.wanderT-=dt; if(e.wanderT<=0){ e.wanderT=srnd(1.5,3.5); e.vx=srnd(-1,1); e.vy=srnd(-1,1); }
@@ -304,6 +324,19 @@ function runServerBossAI(zone,e,tgt){
       out.spots=spots; out.delay=1.5; out.r=46; out.dmg=Math.round(e.dmg*1.3);
     }
   }
+  // AUTHORITATIVE AOE damage: after the telegraph delay, the SERVER applies the hit to
+  // players standing in the marked spots (client telegraphs are visual-only now).
+  if(out.dmg){
+    const _dmg=out.dmg, _r=(out.r||46)+12, _spots=(out.spots||[]).slice(), _ring=(out.kind==='shockwave'), _bx=e.x, _by=e.y, _maxR=out.maxR||0;
+    setTimeout(()=>{ try{
+      for(const p of zonePlayers(zone)){
+        let hitp=false;
+        if(_ring){ if(sdist(p.x,p.y,_bx,_by) <= _maxR+16) hitp=true; }
+        else { for(const s of _spots){ if(sdist(p.x,p.y,s.x,s.y) <= _r){ hitp=true; break; } } }
+        if(hitp) serverHurtPlayer(zone, p, _dmg, 'aoe');
+      }
+    }catch(_e){} }, Math.max(200,(out.delay||1.4)*1000));
+  }
   for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
 }
 // apply a player's hit to a server mob; handle death + rewards broadcast.
@@ -343,11 +376,12 @@ function applyHitToMob(player, id, clientDmg){
     const idx=mobs.indexOf(e); if(idx>=0) mobs.splice(idx,1);
     const out={ t:'mdead', zone, id:e.id, by:e.lastHitBy, boss:!!e.boss, type:e.type, xp:e.xp|0, x:Math.round(e.x), y:Math.round(e.y) };
     for(const [ws2,q] of clients) if(q.zone===zone) send(ws2,out);
-    // Phase 2: the SERVER grants only the ECONOMY reward (gold + items) to the
-    // killer and pushes authoritative inventory/gold. XP, level, mount tame and
-    // kill-counts are handled client-side (self-progression, not duplicable).
+    // Phase 2 (full authority): the SERVER grants the ECONOMY reward (gold + items)
+    // AND all PROGRESSION (XP, level, combat skill XP, kill counts, mount tame) and
+    // pushes the COMPLETE authoritative state. The client no longer mutates any of it.
     if(economy && player.econ){
-      const reward = economy.grantKill(player.econ, e.type, zone);
+      const style = (player.econ.equip && player.econ.equip.weapon && player.econ.equip.weapon.atype) || 'melee';
+      const reward = economy.grantKill(player.econ, e.type, zone, style);
       // Phase 2: items become GROUND DROPS (walk over to grab). If the killer is
       // in a party, GEAR instead goes to a shared Need/Greed roll.
       const party = partyOf(player);
@@ -371,7 +405,7 @@ function applyHitToMob(player, id, clientDmg){
         for(const ws2 of clients.keys()) send(ws2, flex);
       }
       const kws = wsById(player.id);
-      if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss, gold:reward.gold, topRarity:(top?top.rarity:null) });
+      if(kws){ send(kws, { t:'reward', x:Math.round(e.x), y:Math.round(e.y), boss:!!e.boss, gold:reward.gold, xp:reward.xp, levelUp:!!reward.levelUp, level:reward.level, tamed:reward.tamed||null, topRarity:(top?top.rarity:null) });
         pushState(kws, player); }
     }
   }
@@ -561,9 +595,10 @@ wss.on('connection', (ws, req) => {
       player.zone = m.zone || player.zone;
       player.moving = !!m.moving;
       player.sw = m.sw?1:0;
-      if (m.hp != null) player.hp = m.hp;
-      if (m.maxHp != null) player.maxHp = m.maxHp;
-      if (m.def != null) player.def = m.def;
+      // HP is server-authoritative now — do NOT trust client-reported hp (godmode fix).
+      // Keep the server mirror in sync from econ; def is computed from owned gear.
+      if (player.econ){ player.hp = Number(player.econ.hp); player.maxHp = Number(player.econ.maxHp); }
+      else if (m.maxHp != null) player.maxHp = m.maxHp;
       if (player.zone !== oldZone) { assignHost(oldZone); assignHost(player.zone); }
     } else if (m.t === 'active') {
       // foreground/background signal — a backgrounded host yields the zone to an active player
@@ -572,6 +607,12 @@ wss.on('connection', (ws, req) => {
       // returning from away after dying there → tell the client to run its death/respawn
       if (m.active && player.dead) { player.dead = false; const ws2 = wsById(player.id); if (ws2) send(ws2, { t:'youdied' }); }
       if (was !== player.inactive) assignHost(player.zone);
+    } else if (m.t === 'respawn') {
+      // client finished its death timer — SERVER restores full HP authoritatively
+      if (economy && player.econ) {
+        player.dead = false; player.econ.hp = Number(player.econ.maxHp)||100; player.hp = player.econ.hp;
+        const rws = wsById(player.id); if (rws) pushState(rws, player); saveEcon(player);
+      }
     } else if (m.t === 'zonemap') {
       // a client uploads the seed-deterministic collision grid + spawn data for a zone
       ingestZoneMap(m.zone, m);
@@ -607,6 +648,8 @@ wss.on('connection', (ws, req) => {
       else if (m.t === 'econ_cook')      r = E.doCook(ec, m.id);
       else if (m.t === 'econ_buytool')   r = E.doBuyTool(ec, m.tool);
       else if (m.t === 'econ_starterkit')r = E.doStarterKit(ec);
+      else if (m.t === 'econ_gather')    r = E.doGather(ec, m.kind, m.tier);
+      else if (m.t === 'econ_unlock')    r = E.doUnlock(ec, m.key);
       else if (m.t === 'econ_pickup') {
         // pick up a server ground drop the player is standing on
         const arr = zoneDrops[player.zone] || [];

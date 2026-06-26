@@ -200,13 +200,16 @@ function doCook(econ, rawId){
   const i = econ.inventory.findIndex(it=>it && it.id===rawId && it.kind==='fishraw');
   if(i<0) return { ok:false, err:'no raw fish' };
   const raw = econ.inventory[i]; econ.inventory.splice(i,1);
+  const cookXp = Math.max(1, num(raw.cookXp)||30);
   if(Math.random() < 0.95){
     econ.inventory.push({ id:uid(), kind:'food', icon:'fishck', name:String(raw.fishName||'Fish').slice(0,30),
       value:Math.max(3,Math.round(num(raw.heal)/3)), rarity:'common', heal:num(raw.heal), fishName:raw.fishName, desc:'Eat to heal.' });
-    return { ok:true, burnt:false, name:raw.fishName };
+    addSkillXp(econ,'cooking', cookXp);                      // server-owned cooking XP
+    return { ok:true, burnt:false, name:raw.fishName, xp:cookXp };
   }
   econ.inventory.push({ id:uid(), kind:'junk', icon:'fishburn', name:'Burnt Fish', value:0, rarity:'common', desc:'Oops. Inedible.' });
-  return { ok:true, burnt:true, name:raw.fishName };
+  addSkillXp(econ,'cooking', Math.round(cookXp*0.15));       // partial XP on a burn
+  return { ok:true, burnt:true, name:raw.fishName, xp:Math.round(cookXp*0.15) };
 }
 function doBuyTool(econ, tool){
   if(!TOOL_NAMES[tool]) return { ok:false, err:'bad tool' };
@@ -355,23 +358,20 @@ function fromSave(p){
 // Merge the server's owned fields back over a client save before persisting,
 // so the disk copy reflects authoritative ECONOMY while keeping the client's
 // self-progression (levels/skills/mounts/kills) and position/appearance intact.
+// Persist the server's FULL authoritative state over the client save before writing,
+// keeping the client's non-authoritative bits (position, appearance, name, home).
+// The server now owns ALL progression, so it must persist all of it — otherwise a
+// stale client cloudsave could revert server-authored levels/skills (the wipe).
 function mergeIntoSave(clientSave, econ){
   const save = (clientSave && typeof clientSave==='object') ? clientSave : { v:1, p:{} };
   if(!save.p || typeof save.p!=='object') save.p = {};
-  for(const f of OWNED_FIELDS) save.p[f] = econ[f];
+  for(const f of STATE_FIELDS) save.p[f] = econ[f];
   return save;
 }
-// Refresh the server's COPY of client-owned, damage-relevant fields from a
-// fresh cloudsave, so server-side damage stays accurate as the player levels
-// skills client-side. Never touches OWNED_FIELDS (those stay authoritative).
-function refreshState(econ, p){
-  if(!p || typeof p!=='object') return;
-  if('baseDmg' in p) econ.baseDmg = num(p.baseDmg);
-  if('level' in p)   econ.level   = num(p.level);
-  if('maxHp' in p)   econ.maxHp   = num(p.maxHp);
-  if(p.skills   && typeof p.skills==='object')   econ.skills   = p.skills;
-  if(p.unlocked && typeof p.unlocked==='object') econ.unlocked = p.unlocked;
-}
+// The server is now fully authoritative, so a client cloudsave must NEVER feed
+// progression back into the server state — that path was a stale-wipe vector.
+// Kept as a no-op so existing call sites stay valid.
+function refreshState(econ, p){ /* server owns all state; ignore client-claimed fields */ }
 
 // ---------- the one authoritative mutation we wire first: a kill ----------
 // Grants gold + XP + (maybe) loot for killing `enemyType` in `zone`, mutating
@@ -382,11 +382,24 @@ function refreshState(econ, p){
 // mount taming and kill-counts are SELF-progression and are handled by the
 // client (they can't be duplicated), so the server never touches them here —
 // that's what stops the level-up wipe.
-function grantKill(econ, enemyType, zone){
-  const et = ENEMY[enemyType] || { gold:[1,3], dropChance:0.3 };
-  const out = { gold:0, items:[], boss:!!et.boss };
+function grantKill(econ, enemyType, zone, style){
+  const et = ENEMY[enemyType] || { gold:[1,3], dropChance:0.3, xp:5 };
+  const out = { gold:0, items:[], boss:!!et.boss, xp:0, level:num(econ.level), levelUp:false, tamed:null };
   // gold (instant, added to econ)
   const gold = ri(et.gold[0], et.gold[1]); econ.gold = num(econ.gold)+gold; out.gold = gold;
+  // PROGRESSION (server-authoritative): player XP/level, combat skill XP, kill counts, mounts.
+  // These used to be client-side (the cheat surface + the wipe risk). Now the server owns
+  // them and pushes the full state, so the client can neither fake nor lose them.
+  const xp = Math.max(1, Math.round(num(et.xp)||5)); out.xp = xp;
+  const lvlBefore = num(econ.level);
+  gainXp(econ, xp);
+  awardCombatXp(econ, style||'melee', xp);
+  out.level = num(econ.level); out.levelUp = out.level > lvlBefore;
+  econ.totalKills = num(econ.totalKills)+1;
+  if(!econ.zoneKills || typeof econ.zoneKills!=='object') econ.zoneKills={};
+  econ.zoneKills[zone] = num(econ.zoneKills[zone])+1;
+  if(et.boss){ if(!econ.bossKills||typeof econ.bossKills!=='object') econ.bossKills={}; econ.bossKills[zone]=true; }
+  if(et.mount){ if(!Array.isArray(econ.mounts)) econ.mounts=[]; if(!econ.mounts.includes(et.mount)){ econ.mounts.push(et.mount); out.tamed=et.mount; } }
   // items are ROLLED but NOT added to inventory — the caller places them as
   // ground drops (picked up by walking over them). Keeps the loot-on-floor feel.
   const loot = rollEnemyLoot(enemyType, zone);
@@ -572,9 +585,83 @@ function doBuyGear(econ, stock, id){
   return { ok:true, item:bought, name:bought.name };
 }
 
+// ---------- server-owned GATHERING (mining / woodcutting / fishing) ----------
+// Ports of the client tables. The SERVER rolls success, validates tool + level,
+// and rate-limits per skill so the gather action can't be spammed to mint XP/items.
+const GATHER_NODES = {
+  tree: [
+    {req:1,xp:25,name:'Logs',color:'#5a8f3a',period:1.1},
+    {req:5,xp:38,name:'Oak Logs',color:'#6a7a32',period:1.2},
+    {req:15,xp:68,name:'Willow Logs',color:'#6fae5a',period:1.3},
+    {req:30,xp:100,name:'Maple Logs',color:'#c06a3a',period:1.5},
+    {req:45,xp:175,name:'Yew Logs',color:'#3f6e35',period:1.7},
+    {req:60,xp:250,name:'Magic Logs',color:'#5ab0c0',period:2.0},
+  ],
+  rock: [
+    {req:1,xp:18,name:'Copper Ore',color:'#c87a44',period:1.3},
+    {req:1,xp:18,name:'Tin Ore',color:'#b8b0a0',period:1.3},
+    {req:10,xp:35,name:'Iron Ore',color:'#b06a55',period:1.5},
+    {req:18,xp:50,name:'Coal',color:'#3a3a40',period:1.6},
+    {req:35,xp:90,name:'Mithril Ore',color:'#5a86c4',period:1.9},
+    {req:50,xp:140,name:'Adamant Ore',color:'#3f9a72',period:2.1},
+    {req:70,xp:230,name:'Runite Ore',color:'#4ac0c0',period:2.4},
+  ],
+  fish: [
+    {req:1,xp:20,name:'Shrimp',heal:18,cookReq:1,cookXp:30,period:1.3},
+    {req:5,xp:30,name:'Sardine',heal:26,cookReq:1,cookXp:42,period:1.3},
+    {req:15,xp:55,name:'Trout',heal:42,cookReq:15,cookXp:70,period:1.5},
+    {req:25,xp:80,name:'Salmon',heal:62,cookReq:25,cookXp:95,period:1.6},
+    {req:35,xp:120,name:'Lobster',heal:92,cookReq:40,cookXp:130,period:1.8},
+    {req:50,xp:180,name:'Swordfish',heal:140,cookReq:55,cookXp:180,period:2.0},
+    {req:10,xp:42,name:'Perch',heal:34,cookReq:10,cookXp:55,period:1.4},
+  ],
+};
+function doGather(econ, kind, tier){
+  const tbl = GATHER_NODES[kind]; if(!tbl) return { ok:false, err:'bad node' };
+  tier = Math.max(0, Math.min(tbl.length-1, Math.round(num(tier))));
+  const node = tbl[tier];
+  const skill = kind==='tree'?'woodcutting':kind==='rock'?'mining':'fishing';
+  const tool  = kind==='tree'?'axe':kind==='rock'?'pickaxe':'rod';
+  if(!econ.inventory.some(it=>it&&it.kind==='tool'&&it.tool===tool)) return { ok:false, err:'need '+tool };
+  if(skillLvl(econ, skill) < node.req) return { ok:false, err:'level too low' };
+  // per-skill rate limit: can't gather faster than the node's swing period (minus a latency grace)
+  const nowMs = Date.now();
+  if(!econ._gatherAt || typeof econ._gatherAt!=='object') econ._gatherAt={};
+  const minGap = ((node.period||1.3)*1000) - 250;
+  if(nowMs - (num(econ._gatherAt[skill])) < minGap) return { ok:false, err:'too fast' };
+  econ._gatherAt[skill]=nowMs;
+  // fishing is gated by the client minigame (you won it), so it always yields here;
+  // mining/woodcutting roll a success chance. Both are still rate-limited + level-gated above.
+  if(kind!=='fish'){
+    const chance = Math.max(0.32, Math.min(0.93, 0.4 + (skillLvl(econ,skill)-node.req)*0.028));
+    if(Math.random() >= chance) return { ok:true, success:false, skill };
+  }
+  let item;
+  if(kind==='fish'){
+    item = { id:uid(), kind:'fishraw', icon:'fish', name:'Raw '+node.name, value:Math.max(2,Math.round(node.heal/4)),
+      rarity:'common', heal:node.heal, cookReq:node.cookReq, cookXp:node.cookXp, fishName:node.name, desc:'Cook at a range to make it edible.' };
+  } else {
+    const val = kind==='tree'?Math.max(3,tier*4+4):Math.max(4,tier*5+5);
+    item = { id:uid(), kind:'material', icon:(kind==='tree'?'log':'ore'), name:node.name, value:val, rarity:'common', color:node.color, desc:'A gathered material.' };
+  }
+  econ.inventory.push(item);
+  addSkillXp(econ, skill, node.xp);
+  return { ok:true, success:true, skill, item, xp:node.xp, name:node.name };
+}
+// ---------- server-owned skill-tree UNLOCK (spends a skill point) ----------
+function doUnlock(econ, key){
+  key=String(key||'').slice(0,32); if(!key) return { ok:false, err:'bad key' };
+  if(!econ.unlocked || typeof econ.unlocked!=='object') econ.unlocked={};
+  if(econ.unlocked[key]) return { ok:false, err:'already learned' };
+  if(num(econ.skillPoints) < 1) return { ok:false, err:'no skill points' };
+  econ.skillPoints = num(econ.skillPoints)-1;
+  econ.unlocked[key]=true;
+  if(key==='vitality'){ econ.maxHp=num(econ.maxHp)+50; econ.hp=Math.min(econ.maxHp, num(econ.hp)+50); }
+  return { ok:true, key };
+}
+
 module.exports = {
   OWNED_FIELDS, STATE_FIELDS, fromSave, mergeIntoSave, refreshState, grantKill,
-  rollEnemyLoot, makeGear, cloneConsumable, randomCosmetic, sellValue, upgradeCost, enhancePlan,
   effectiveDamage, rollHitDamage, weaponDamage, skillLvl,
   addSkillXp, awardCombatXp, gainXp, skillNeed, ri, uid,
   ENEMY, ZONE_LOOT, CONSUMABLES,
@@ -582,7 +669,7 @@ module.exports = {
   doSell, doSellMany, doUpgrade, doEnchant, doBuyConsumable, doEquip, doUnequip, doUse, doDrop,
   doDeposit, doWithdraw, doDepositAll,
   resolveOfferItems, executeTrade, grantBarrel,
-  giveSafe, doCook, doBuyTool, doStarterKit,
+  giveSafe, doCook, doBuyTool, doStarterKit, doGather, doUnlock,
   giveQuestItem,
   genShopStock, doBuyGear,
 };
