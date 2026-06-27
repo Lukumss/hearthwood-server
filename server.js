@@ -159,7 +159,7 @@ function ingestZoneMap(zone, d){
     for(const b of d.bossSpawns){ const mob=spawnMob(zone, b.type, b.x, b.y, true, zoneMaps[zone].partyScale); if(mob){ mob.bossAI=b.bossAI||mob.bossAI; mob.room=b.room; } }
   } else if((d.maxMobs||0) > 0){
     // boss + camp guards + an initial population
-    if(d.bossSpawn) spawnMob(zone, d.bossSpawn.type, d.bossSpawn.x, d.bossSpawn.y, true);
+    if(d.bossSpawn){ const _b=spawnMob(zone, d.bossSpawn.type, d.bossSpawn.x, d.bossSpawn.y, true); if(_b && d.bossSpawn.arenaR) _b.arenaR=d.bossSpawn.arenaR; }
     for(const c of (d.campSpawns||[])) spawnMob(zone, c.type||'mercenary', c.x, c.y, false);
     const initial = Math.min(Math.round(d.maxMobs*0.55), d.maxMobs);
     for(let i=0;i<initial;i++) spawnRandomMobAt(zone);
@@ -257,8 +257,12 @@ function simZone(zone, dt){
     const near=nearestPlayer(zone, e.x, e.y);
     const tgt=near?near.p:null, d=near?near.d:1e9;
     const distHome=sdist(e.x,e.y,e.homeX,e.homeY);
-    // boss AOE telegraph (server-driven; broadcast so all see + can be hit)
-    if(e.boss && e.bossAI){ e.castCd-=dt; if(e.castCd<=0 && tgt){ e.castCd= e.bossAI==='dragon'?7:3; runServerBossAI(zone,e,tgt); } }
+    // AREA-BOUND BOSS: it only senses/attacks players inside its arena, and marches
+    // home (healing to full) if dragged out — it can never roam or strike across the map.
+    const bossArena = e.boss ? (e.arenaR||300) : 0;
+    const tgtInArena = !e.boss || (tgt && sdist(tgt.x,tgt.y,e.homeX,e.homeY) < bossArena);
+    // boss AOE telegraph (server-driven) — ONLY when a target stands inside the arena
+    if(e.boss && e.bossAI){ e.castCd-=dt; if(e.castCd<=0 && tgt && tgtInArena){ e.castCd= e.bossAI==='dragon'?7:3; runServerBossAI(zone,e,tgt); } }
     if(e.flee){
       if(tgt && d<170){ const ang=Math.atan2(e.y-tgt.y,e.x-tgt.x)+srnd(-0.4,0.4); stepMobToward(map,e,e.x+Math.cos(ang)*60,e.y+Math.sin(ang)*60,e.speed,dt,4,3); e.dir=Math.cos(ang)<0?'left':'right'; }
       else { e.wanderT-=dt; if(e.wanderT<=0){ e.wanderT=srnd(1,2.5); e.vx=srnd(-1,1); e.vy=srnd(-1,1); } stepMobToward(map,e,e.x+e.vx*40,e.y+e.vy*40,e.speed*0.4,dt,4,3); }
@@ -266,12 +270,13 @@ function simZone(zone, dt){
     }
     const peaceful = (zone==='forest' && !e.boss);   // gentle starting area
     if(!e.boss && distHome>leash){ e.state='return'; }
-    if(e.state==='return'){ if(distHome<30){ e.state='idle'; if(peaceful) e.lastHitBy=null; } else { stepMobToward(map,e,e.homeX,e.homeY,e.speed,dt,5,4); continue; } }
+    if(e.boss && distHome>bossArena){ e.state='return'; }   // boss bound to its arena
+    if(e.state==='return'){ if(distHome<(e.boss?24:30)){ e.state='idle'; if(peaceful) e.lastHitBy=null; if(e.boss){ e.hp=e.maxHp; e.ecyc=0; } } else { stepMobToward(map,e,e.homeX,e.homeY,e.speed*(e.boss?1.6:1),dt,5,4); continue; } }
     // Forest roamers DON'T aggro on sight (so a new player isn't mobbed) but FIGHT BACK once attacked;
     // they calm down again after leashing home (lastHitBy cleared above). The zone boss always fights.
     const provoked = peaceful && !!e.lastHitBy;
-    if((!peaceful || provoked) && tgt && (d<e.aggro || e.boss)) e.state='chase';
-    else if((peaceful && !provoked) || d>e.aggro*1.6) e.state='idle';
+    if((!peaceful || provoked) && tgt && tgtInArena && (d<e.aggro || e.boss)) e.state='chase';
+    else if((peaceful && !provoked) || d>e.aggro*1.6 || (e.boss && !tgtInArena)) e.state='idle';
     if(e.state==='chase' && tgt){
       if(d>e.range*0.85){ stepMobToward(map,e,tgt.x,tgt.y,e.speed,dt,4,3); e.dir = Math.abs(tgt.x-e.x)>Math.abs(tgt.y-e.y)?(tgt.x<e.x?'left':'right'):(tgt.y<e.y?'up':'down'); }
       else if(e.atkCd<=0){ e.atkCd=1/e.atkspd; e.swing=0.2;
