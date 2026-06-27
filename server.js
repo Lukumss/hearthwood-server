@@ -323,6 +323,33 @@ function runServerBossAI(zone,e,tgt){
       for(let i=0;i<Math.min(3,players.length);i++){ const p=players[(i+1)%players.length]; spots.push({x:Math.round(p.x+srnd(-26,26)),y:Math.round(p.y+srnd(-26,26))}); }
       out.spots=spots; out.delay=1.5; out.r=46; out.dmg=Math.round(e.dmg*1.3);
     }
+  } else if(e.bossAI==='elder'){
+    // THE WOODEN ELDER — three telegraphed mechanics, gated by HP phase.
+    //   P1 (>66%): Grasping Roots only
+    //   P2 (≤66%): + Thornseed Volley
+    //   P3 (≤33%): + Blight Nova & summons Corrupt Saplings
+    const frac=e.hp/e.maxHp;
+    const avail = frac<=0.33 ? 3 : frac<=0.66 ? 2 : 1;
+    e.ecyc = ((e.ecyc||0)+1) % avail;
+    if(e.ecyc===0){
+      // (1) GRASPING ROOTS — bursts erupt under the party; step off the marks
+      e.castCd=srnd(3.5,5);
+      const spots=[{x:Math.round(tgt.x),y:Math.round(tgt.y)}];
+      for(let i=0;i<Math.min(3,players.length);i++){ const p=players[(i+1)%players.length]; spots.push({x:Math.round(p.x+srnd(-22,22)),y:Math.round(p.y+srnd(-22,22))}); }
+      out.kind='roots'; out.spots=spots; out.delay=1.5; out.r=42; out.dmg=Math.round(e.dmg*1.25);
+    } else if(e.ecyc===1){
+      // (2) THORNSEED VOLLEY — a spreading line of thorns toward the target; dodge sideways
+      e.castCd=srnd(4,5.5);
+      const ang=Math.atan2(tgt.y-e.y,tgt.x-e.x); const spots=[];
+      for(let i=1;i<=6;i++){ const d=i*40; spots.push({x:Math.round(e.x+Math.cos(ang)*d+srnd(-8,8)),y:Math.round(e.y+Math.sin(ang)*d+srnd(-8,8))}); }
+      out.kind='roots'; out.spots=spots; out.delay=1.2; out.r=34; out.dmg=Math.round(e.dmg*1.4);
+    } else {
+      // (3) BLIGHT NOVA — outrun the expanding ring; the Elder also summons Corrupt Saplings
+      e.castCd=srnd(6,7.5);
+      out.kind='shockwave'; out.delay=1.0; out.maxR=210; out.expand=1.15; out.dmg=Math.round(e.dmg*1.35);
+      const adds=(zoneMobs[zone]||[]).filter(m=>m.type==='corrupt_sapling').length;
+      if(adds<4){ for(let i=0;i<2;i++){ const a=srnd(0,6.28), d=srnd(46,84); spawnMob(zone,'corrupt_sapling',e.x+Math.cos(a)*d,e.y+Math.sin(a)*d,false); } }
+    }
   }
   // AUTHORITATIVE AOE damage: after the telegraph delay, the SERVER applies the hit to
   // players standing in the marked spots (client telegraphs are visual-only now).
@@ -347,6 +374,13 @@ function runServerBossAI(zone,e,tgt){
 function applyHitToMob(player, id, clientDmg){
   const zone = player.zone; const mobs=zoneMobs[zone]; if(!mobs) return;
   const e=mobs.find(m=>m.id===id); if(!e) return;
+  // RAID SCALING: the first time the Wooden Elder is engaged, scale his HP/damage to
+  // the size of the group that pulled him (snapshot at first hit). A lone player gets
+  // the base fight; a full party faces a genuine raid wall.
+  if(e.bossAI==='elder' && !e._scaled){
+    e._scaled=true; const n=Math.max(1, zonePlayers(zone).length);
+    if(n>1){ const k=1+(n-1)*0.7; e.maxHp=Math.round(e.maxHp*k); e.hp=e.maxHp; e.dmg=Math.round(e.dmg*(1+(n-1)*0.12)); }
+  }
   // Phase 6: ATTACK-CADENCE GATE. The client limits attacks to 1/weaponSpeed
   // seconds apart; the server enforces the same so a scripted client can't
   // machine-gun hits. We allow generous leeway (55%) so latency/jitter never
