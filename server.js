@@ -64,6 +64,21 @@ function writeLists(o){ try { fs.writeFileSync(listsPath(), JSON.stringify(o)); 
 let LISTS = readLists(); if(!LISTS.bugs) LISTS.bugs=[]; if(!LISTS.wishes) LISTS.wishes=[];
 function listsMsg(){ return { t:'lists', bugs:LISTS.bugs, wishes:LISTS.wishes }; }
 
+// ---- shared MAP LAYOUTS (visual map editor → every client worldwide) ----
+// The staging editor PUBLISHES a zone's full props+ground here over HTTP (JSON,
+// so nothing is ever truncated). Every client FETCHES them on load, so authored
+// maps reach all testers without rebundling. Live stays safe: the committed
+// placements.js is the baseline; this only OVERRIDES a zone once it's published.
+// Stored on the same durable disk as saves (survives restarts + redeploys).
+function mapLayoutsPath(){ return path.join(SAVE_DIR, '_maplayouts.json'); }
+function readMapLayouts(){ try { return JSON.parse(fs.readFileSync(mapLayoutsPath(), 'utf8')); } catch (e) { return { zones:{} }; } }
+function writeMapLayouts(o){ try { fs.writeFileSync(mapLayoutsPath(), JSON.stringify(o)); return true; } catch (e) { return false; } }
+let MAPLAYOUTS = readMapLayouts(); if(!MAPLAYOUTS.zones) MAPLAYOUTS.zones={};
+// publishing requires this token (the staging editor sends it). Override by setting
+// MAP_EDIT_SECRET in the service's Environment tab — keep it matching on the client.
+const MAP_EDIT_SECRET = process.env.MAP_EDIT_SECRET || 'hearthwood-mapedit-2026';
+const CORS = { 'Access-Control-Allow-Origin':'*', 'Access-Control-Allow-Methods':'GET,POST,OPTIONS', 'Access-Control-Allow-Headers':'Content-Type' };
+
 const PORT = process.env.PORT || 2567;       // hosts set PORT automatically
 const WORLD_SEED = 424242;                    // the whole realm grows from this — keep it fixed forever
 const TICK_MS = 1000 / 15;                    // 15 snapshots per second
@@ -71,6 +86,37 @@ const TICK_MS = 1000 / 15;                    // 15 snapshots per second
 // a tiny health page so you can open the server URL in a browser and see it's alive
 const SERVER_VERSION = 'LIVE-2026-06-20';   // bump on every deploy to confirm Render updated
 const server = http.createServer((req, res) => {
+  const url = (req.url || '').split('?')[0];
+  // CORS preflight for the cross-origin map-editor publish
+  if (req.method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return; }
+  // GET /maplayouts — every client fetches published authored layouts on load
+  if (url === '/maplayouts' && req.method === 'GET') {
+    res.writeHead(200, Object.assign({ 'Content-Type':'application/json' }, CORS));
+    res.end(JSON.stringify({ zones: MAPLAYOUTS.zones, updated: MAPLAYOUTS.updated || 0 }));
+    return;
+  }
+  // POST /maplayout — staging editor publishes one zone's full props+ground (token-gated)
+  if (url === '/maplayout' && req.method === 'POST') {
+    let body = '', tooBig = false;
+    req.on('data', c => { body += c; if (body.length > 8e6) { tooBig = true; req.destroy(); } });
+    req.on('end', () => {
+      const J = (code, obj) => { res.writeHead(code, Object.assign({ 'Content-Type':'application/json' }, CORS)); res.end(JSON.stringify(obj)); };
+      if (tooBig) return J(413, { ok:false, err:'layout too big' });
+      let d; try { d = JSON.parse(body); } catch (e) { return J(400, { ok:false, err:'bad json' }); }
+      if (!d || d.secret !== MAP_EDIT_SECRET) return J(403, { ok:false, err:'forbidden (bad secret)' });
+      const zone = String(d.zone || '').slice(0, 40).replace(/[^a-z0-9_]/gi, '');
+      if (!zone) return J(400, { ok:false, err:'no zone' });
+      const props  = Array.isArray(d.props)  ? d.props  : [];
+      const ground = Array.isArray(d.ground) ? d.ground : [];
+      MAPLAYOUTS.zones[zone] = { props, ground, by:String(d.by || '').slice(0,24), ts:Date.now() };
+      MAPLAYOUTS.updated = Date.now();
+      writeMapLayouts(MAPLAYOUTS);
+      console.log('[maplayout] published ' + zone + ' props=' + props.length + ' ground=' + ground.length + ' by=' + (d.by || '?'));
+      return J(200, { ok:true, zone, props:props.length, ground:ground.length });
+    });
+    return;
+  }
+  // default health page
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Hearthwood server [' + SERVER_VERSION + '] is running. Players online: ' + clients.size);
 });
